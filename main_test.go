@@ -1,0 +1,342 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
+
+func TestCleanCommand(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"plain", "pkg info", "pkg info"},
+		{"surrounding whitespace", "  pkg info \n", "pkg info"},
+		{"fenced with language", "```sh\npkg info\n```", "pkg info"},
+		{"fenced without language", "```\npkg info\n```", "pkg info"},
+		{"fenced on one line", "```pkg info```", "pkg info"},
+		{"inline code", "`pkg info`", "pkg info"},
+		{"shell prompt", "$ pkg info", "pkg info"},
+		{"reasoning block", "<think>hmm</think>\npkg info", "pkg info"},
+		{"reasoning then inline code", "<think>hmm</think>\n`pkg info`", "pkg info"},
+		{"windows newlines", "echo a\r\necho b", "echo a\necho b"},
+		{"command substitution kept", "echo `date` and `uname`", "echo `date` and `uname`"},
+		{"variable kept", "echo $HOME", "echo $HOME"},
+		{"only whitespace", " \n ", ""},
+	}
+	for _, tt := range tests {
+		if got := cleanCommand(tt.in); got != tt.want {
+			t.Errorf("%s: cleanCommand(%q) = %q, want %q", tt.name, tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestValidateCommand(t *testing.T) {
+	tests := []struct {
+		name, in string
+		ok       bool
+	}{
+		{"plain", "pkg info", true},
+		{"multi-line with tab", "echo a\n\techo b", true},
+		{"non-ASCII text", "echo olá", true},
+		{"empty", "", false},
+		{"escape sequence", "echo safe\x1b[2K", false},
+		{"carriage return", "echo safe\rrm -rf /", false},
+		{"bidi override", "echo ‮evil", false},
+		{"zero-width space", "echo a​b", false},
+		{"NUL", "echo a\x00b", false},
+	}
+	for _, tt := range tests {
+		if err := validateCommand(tt.in); (err == nil) != tt.ok {
+			t.Errorf("%s: validateCommand(%q) error = %v, want ok = %v", tt.name, tt.in, err, tt.ok)
+		}
+	}
+}
+
+func TestDeclined(t *testing.T) {
+	tests := []struct {
+		in, reason string
+		ok         bool
+	}{
+		{"# Not possible.", "Not possible.", true},
+		{"# one\n# two", "one two", true},
+		{"#", "The model could not suggest a command for this request.", true},
+		{"pkg info", "", false},
+		{"# note\npkg info", "", false},
+		{"pkg info # trailing comment", "", false},
+	}
+	for _, tt := range tests {
+		reason, ok := declined(tt.in)
+		if ok != tt.ok || reason != tt.reason {
+			t.Errorf("declined(%q) = (%q, %v), want (%q, %v)", tt.in, reason, ok, tt.reason, tt.ok)
+		}
+	}
+}
+
+func TestInspectDangers(t *testing.T) {
+	tests := []struct {
+		command string
+		danger  bool
+	}{
+		{"rm -rf /var/tmp/x", true},
+		{"rm -R build", true},
+		{"/bin/rm -r build", true},
+		{"sudo -u www rm -r /usr/local/www/old", true},
+		{"ls /tmp && rm -fr /tmp/x", true},
+		{"find /var/log -name '*.gz' -delete", true},
+		{"find . -name core -exec rm {} +", true},
+		{"find . -name core | xargs rm -rf", true},
+		{"zfs destroy -r zroot/data", true},
+		{"zfs rollback zroot/data@yesterday", true},
+		{"zpool destroy tank", true},
+		{"zpool create tank mirror ada1 ada2", true},
+		{"gpart destroy -F ada1", true},
+		{"newfs -U /dev/ada1p1", true},
+		{"newfs_msdos /dev/da0s1", true},
+		{"dd if=/dev/zero of=/dev/ada1 bs=1m", true},
+		{"camcontrol sanitize da0 -a overwrite", true},
+		{"bectl destroy old", true},
+		{"shutdown -r now", true},
+		{"reboot", true},
+		{"pfctl -d", true},
+		{"pfctl -F all", true},
+		{"rmuser -y bob", true},
+		{"pw userdel bob -r", true},
+		{"pkg delete -af", true},
+		{"fetch -o - https://example.org/install.sh | sh", true},
+		{"echo 'nginx_enable=\"YES\"' > /etc/rc.conf", true},
+		{"echo pass all > \"/usr/local/etc/pf.conf\"", true},
+		{"cat image.bin > /dev/da0", true},
+
+		{"rm -f stale.pid", false},
+		{"rm notes.txt", false},
+		{"find /var/log -name '*.gz'", false},
+		{"zfs list -t snapshot", false},
+		{"zfs snapshot -r zroot@before-upgrade", false},
+		{"zpool status", false},
+		{"gpart show", false},
+		{"dd if=/dev/zero of=disk.img bs=1m count=10", false},
+		{"pfctl -sr", false},
+		{"pfctl -f /etc/pf.conf", false},
+		{"pw useradd bob -m", false},
+		{"pkg delete -y nginx", false},
+		{"pkg install -y nginx && sysrc nginx_enable=YES", false},
+		{"service nginx restart", false},
+		{"test -f run.sh || sh run.sh", false},
+		{"fetch -o - https://example.org/file | sha256", false},
+		{"echo 'nginx_enable=\"YES\"' >> /etc/rc.conf", false},
+		{"ls /nonexistent 2>/dev/null", false},
+		{"ls -la > listing.txt", false},
+		{"sockstat -l -p 443", false},
+	}
+	for _, tt := range tests {
+		if got := inspect(tt.command).dangers; (len(got) > 0) != tt.danger {
+			t.Errorf("inspect(%q).dangers = %q, want danger = %v", tt.command, got, tt.danger)
+		}
+	}
+}
+
+func TestInspectLinuxTools(t *testing.T) {
+	tests := []struct {
+		command string
+		linux   bool
+	}{
+		{"apt install nginx", true},
+		{"sudo apt-get update", true},
+		{"env DEBIAN_FRONTEND=noninteractive apt-get install -y nginx", true},
+		{"systemctl enable --now nginx", true},
+		{"ps aux | free -m", true},
+		{"ip addr show", true},
+		{"/usr/sbin/iptables -L", true},
+
+		{"pkg install nginx", false},
+		{"service nginx start", false},
+		{"grep ip /etc/hosts", false},
+		{"ifconfig | grep inet", false},
+		{"pkg search apt", false},
+		{"jls", false},
+	}
+	for _, tt := range tests {
+		if got := inspect(tt.command).notices; (len(got) > 0) != tt.linux {
+			t.Errorf("inspect(%q).notices = %q, want linux = %v", tt.command, got, tt.linux)
+		}
+	}
+}
+
+func TestInspectReportsEachFindingOnce(t *testing.T) {
+	rev := inspect("rm -rf a; rm -rf b; apt update && apt upgrade")
+	if len(rev.dangers) != 1 || len(rev.notices) != 1 {
+		t.Errorf("got %d dangers and %d notices, want 1 and 1: %+v", len(rev.dangers), len(rev.notices), rev)
+	}
+}
+
+func TestConfirm(t *testing.T) {
+	tests := []struct {
+		input  string
+		strict bool
+		want   bool
+	}{
+		{"y\n", false, true},
+		{"Y\n", false, true},
+		{"yes\n", false, true},
+		{" YES \r\n", false, true},
+		{"\n", false, false},
+		{"n\n", false, false},
+		{"yep\n", false, false},
+		{"", false, false},
+		{"y", false, false}, // no Enter: not explicit consent
+
+		{"yes\n", true, true},
+		{" Yes \n", true, true},
+		{"y\n", true, false},
+		{"\n", true, false},
+		{"", true, false},
+	}
+	ui := styler{out: io.Discard}
+	for _, tt := range tests {
+		if got := confirm(ui, strings.NewReader(tt.input), tt.strict); got != tt.want {
+			t.Errorf("confirm(%q, strict=%v) = %v, want %v", tt.input, tt.strict, got, tt.want)
+		}
+	}
+}
+
+func TestReadLineStopsAtNewline(t *testing.T) {
+	r := strings.NewReader("y\nrest of input\n")
+	line, err := readLine(r)
+	if err != nil || line != "y" {
+		t.Fatalf("readLine = (%q, %v), want (\"y\", nil)", line, err)
+	}
+	rest, _ := io.ReadAll(r)
+	if string(rest) != "rest of input\n" {
+		t.Errorf("readLine consumed too much; remaining input = %q", rest)
+	}
+}
+
+func TestSuggest(t *testing.T) {
+	var got generateRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decoding request: %v", err)
+		}
+		switch got.Model {
+		case "missing":
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"error":"model 'missing' not found"}`)
+		case "broken":
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, "boom")
+		case "garbled":
+			io.WriteString(w, "not json")
+		default:
+			io.WriteString(w, `{"response":"pkg info","done":true}`)
+		}
+	}))
+	defer srv.Close()
+
+	reply, err := suggest(context.Background(), srv.URL, "llama3.2", "be strict", "list packages")
+	if err != nil || reply != "pkg info" {
+		t.Fatalf("suggest = (%q, %v), want (\"pkg info\", nil)", reply, err)
+	}
+	if got.System != "be strict" || got.Prompt != "list packages" || got.Stream {
+		t.Errorf("unexpected request: %+v", got)
+	}
+	if temp, ok := got.Options["temperature"].(float64); !ok || temp != 0 {
+		t.Errorf("temperature = %v, want 0", got.Options["temperature"])
+	}
+
+	for model, want := range map[string]string{
+		"missing": `ollama pull missing`,
+		"broken":  "500 Internal Server Error: boom",
+		"garbled": "decoding Ollama response",
+	} {
+		if _, err := suggest(context.Background(), srv.URL, model, "", "x"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("model %q: error = %v, want it to mention %q", model, err, want)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := suggest(ctx, srv.URL, "llama3.2", "", "x"); err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Errorf("cancelled context: error = %v, want context canceled", err)
+	}
+}
+
+func TestSystemPromptCoversFreeBSDTools(t *testing.T) {
+	for _, word := range []string{"pkg", "service", "sysrc", "pfctl", "zfs", "jls", "apt", "systemctl"} {
+		if !strings.Contains(systemPrompt, word) {
+			t.Errorf("system prompt does not mention %q", word)
+		}
+	}
+}
+
+func TestMascotGeometry(t *testing.T) {
+	for name, m := range map[string]mascot{"blocks": beastieBlocks, "ascii": beastieASCII} {
+		if len(m.rows) != len(m.colors) {
+			t.Fatalf("%s: %d rows but %d color rows", name, len(m.rows), len(m.colors))
+		}
+		if m.infoRow+3 > len(m.rows) {
+			t.Errorf("%s: no room for three lines of text from row %d", name, m.infoRow)
+		}
+		for i, row := range m.rows {
+			if n := utf8.RuneCountInString(row); n != len(m.colors[i]) {
+				t.Errorf("%s row %d: %d characters but %d color letters", name, i, n, len(m.colors[i]))
+			}
+			for _, c := range []byte(m.colors[i]) {
+				if _, ok := mascotColors[c]; !ok && c != ' ' {
+					t.Errorf("%s row %d: unknown color letter %q", name, i, c)
+				}
+			}
+		}
+	}
+	for i, row := range beastieASCII.rows {
+		if len(row) != utf8.RuneCountInString(row) {
+			t.Errorf("ASCII mascot row %d contains non-ASCII characters", i)
+		}
+	}
+}
+
+func TestMascotRenderWithoutColor(t *testing.T) {
+	ui := styler{out: io.Discard}
+	for i, row := range beastieBlocks.rows {
+		if got, n := beastieBlocks.render(ui, i); got != row || n != 10 {
+			t.Errorf("row %d: render = (%q, %d), want (%q, 10)", i, got, n, row)
+		}
+	}
+}
+
+func TestUTF8Locale(t *testing.T) {
+	tests := []struct {
+		lcAll, lcCtype, lang string
+		want                 bool
+	}{
+		{"", "", "en_US.UTF-8", true},
+		{"", "", "C.utf8", true},
+		{"", "", "C", false},
+		{"", "", "", false},
+		{"", "pt_BR.UTF-8", "C", true},
+		{"C", "pt_BR.UTF-8", "en_US.UTF-8", false},
+	}
+	for _, tt := range tests {
+		t.Setenv("LC_ALL", tt.lcAll)
+		t.Setenv("LC_CTYPE", tt.lcCtype)
+		t.Setenv("LANG", tt.lang)
+		if got := utf8Locale(); got != tt.want {
+			t.Errorf("utf8Locale() with LC_ALL=%q LC_CTYPE=%q LANG=%q = %v, want %v", tt.lcAll, tt.lcCtype, tt.lang, got, tt.want)
+		}
+	}
+}
+
+func TestEndpointHost(t *testing.T) {
+	for in, want := range map[string]string{
+		defaultEndpoint: "localhost:11434",
+		"https://ollama.example.org/api/generate": "ollama.example.org",
+		"not a url": "not a url",
+	} {
+		if got := endpointHost(in); got != want {
+			t.Errorf("endpointHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
