@@ -42,6 +42,15 @@ const (
 	// maxResponseBytes caps how much of an Ollama reply is read. A shell
 	// command is tiny; anything near this size is a misbehaving server.
 	maxResponseBytes = 1 << 20
+
+	// contextTokens is the context window asked of Ollama with every request.
+	// It holds the system prompt, three excerpts and the request with room to
+	// spare. Leaving it to the server would not do: some defaults are too
+	// small, and a prompt that does not fit is cut from the top, dropping the
+	// rules in systemPrompt; FreeBSD's ollama service defaults to 65536, which
+	// costs gigabytes of memory for nothing. Asking for the same size every
+	// time also keeps Ollama from reloading the model between requests.
+	contextTokens = 4096
 )
 
 // Process exit codes. When a suggested command is executed, its own exit code
@@ -182,8 +191,8 @@ func run() int {
 	flag.String("auto-run", def.AutoRun, "comma-separated `commands` that safe mode runs without asking")
 	flag.String("package-manager", def.PackageManager, "install software with `pkg|ports`")
 	flag.String("source-path", def.SourcePath, "`directory` holding the FreeBSD source tree")
-	flag.String("docs-source", def.DocsSource, "`directory` holding the system documentation")
-	flag.String("rag-source", def.RagSource, "`directory` holding your own reference files and books")
+	flag.String("docs-source", def.DocsSource, "`directories` holding documentation, separated by \":\"")
+	flag.String("rag-source", def.RagSource, "`directories` holding your own reference files and books")
 	flag.Bool("verbose", false, "show how the suggestion was obtained")
 	noBanner := flag.Bool("no-banner", false, "do not draw the Beastie banner")
 	configPath := flag.String("config", "", "read settings from `file` instead of the default locations")
@@ -203,6 +212,8 @@ func run() int {
 		usage()
 		return exitUsage
 	}
+	// The one request that is not for the model: the first-time setup.
+	configure := intent == "configure"
 
 	// The controlling terminal is where the interface is drawn and the only
 	// place approval is accepted from. Using it rather than stdin and stderr
@@ -219,6 +230,7 @@ func run() int {
 	// Settings come from the defaults, then the configuration files, then the
 	// environment; flags given on the command line override them all.
 	cfg, configFiles, err := loadSettings(*configPath)
+	saved := cfg
 	flagKeys := map[string]string{
 		"model": "MODEL", "embed-model": "EMBED_MODEL", "endpoint": "ENDPOINT", "timeout": "TIMEOUT", "type": "TYPE",
 		"auto-run": "AUTO_RUN", "package-manager": "PACKAGE_MANAGER", "verbose": "VERBOSE",
@@ -245,7 +257,21 @@ func run() int {
 	}
 
 	if *buildIdx {
-		return runIndex(ui, cfg)
+		return runIndex(ui, cfg, nil)
+	}
+	if configure {
+		if tty == nil {
+			ui.errorf("configure asks questions and needs a terminal")
+			return exitError
+		}
+		file := *configPath
+		if file == "" {
+			file = os.Getenv("BEASTIEPILOT_CONFIG")
+		}
+		if file == "" {
+			file = userConfigPath()
+		}
+		return newSetup(ui, tty, cfg, saved, file, thisMachine(tty)).run()
 	}
 
 	// With an index, look up the documentation closest to the request and
@@ -264,11 +290,7 @@ func run() int {
 	}
 
 	system := systemPrompt + cfg.promptPreferences() + hostContext() + referenceSection(excerpts)
-	numCtx := 0
-	if len(excerpts) > 0 {
-		numCtx = contextWithExcerpts
-	}
-	reply, elapsed, err := ask(ui, cfg, art.animated, "Asking "+cfg.Model, system, intent, numCtx)
+	reply, elapsed, err := ask(ui, cfg, art.animated, "Asking "+cfg.Model, system, intent)
 	if err != nil {
 		return queryFailure(ui, cfg, err)
 	}
@@ -298,7 +320,7 @@ func run() int {
 	printSuggestion(ui, cfg.Model, command, rev)
 
 	if cfg.Type == typeGuided {
-		raw, _, err := ask(ui, cfg, false, "Explaining the command", explainPrompt, "Request: "+intent+"\nCommand: "+command, 0)
+		raw, _, err := ask(ui, cfg, false, "Explaining the command", explainPrompt, "Request: "+intent+"\nCommand: "+command)
 		explanation := cleanExplanation(raw)
 		switch {
 		case errors.Is(err, context.Canceled):
@@ -349,11 +371,11 @@ func run() int {
 }
 
 // ask sends one request to the model and returns its raw reply and how long
-// it took. numCtx, if not zero, is the context window to request.
-func ask(ui styler, cfg settings, animate bool, status, system, prompt string, numCtx int) (string, time.Duration, error) {
+// it took.
+func ask(ui styler, cfg settings, animate bool, status, system, prompt string) (string, time.Duration, error) {
 	var reply string
 	elapsed, err := waiting(ui, cfg, animate, status, func(ctx context.Context) (err error) {
-		reply, err = suggest(ctx, cfg.Endpoint, cfg.Model, system, prompt, numCtx)
+		reply, err = suggest(ctx, cfg.Endpoint, cfg.Model, system, prompt)
 		return err
 	})
 	return reply, elapsed, err
@@ -404,11 +426,17 @@ func queryFailure(ui styler, cfg settings, err error) int {
 func usage() {
 	out := flag.CommandLine.Output()
 	fmt.Fprint(out, `Usage: beastiepilot [flags] <what you want to do>
+       beastiepilot [flags] configure
        beastiepilot [flags] -index
 
 Translates a plain-language request into a FreeBSD shell command using a local
 Ollama model, then asks for confirmation before running it. With -type guided
 it also explains the command. Commands listed in AUTO_RUN run without asking.
+
+The single word "configure" sets the machine up instead: it offers to install
+and start Ollama, download the models, install the FreeBSD source tree and
+documentation, save your settings and build the index. It asks before each
+step, and can be run again at any time.
 
 With -index it reads the manual pages, documentation and files of your own
 under SOURCE_PATH, DOCS_SOURCE and RAG_SOURCE into an index. From then on the
@@ -485,13 +513,9 @@ func hostNotices() []string {
 
 // suggest asks the Ollama model at endpoint to translate intent into a shell
 // command under the given system prompt and returns the model's raw reply.
-// numCtx, if not zero, sets the size of the model's context window in tokens.
-func suggest(ctx context.Context, endpoint, model, system, intent string, numCtx int) (string, error) {
+func suggest(ctx context.Context, endpoint, model, system, intent string) (string, error) {
 	// Temperature 0 keeps suggestions as deterministic as the model allows.
-	options := map[string]any{"temperature": 0}
-	if numCtx > 0 {
-		options["num_ctx"] = numCtx
-	}
+	options := map[string]any{"temperature": 0, "num_ctx": contextTokens}
 	body, err := json.Marshal(generateRequest{
 		Model:   model,
 		System:  system,

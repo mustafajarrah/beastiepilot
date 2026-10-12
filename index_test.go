@@ -436,22 +436,30 @@ func TestPlanIndex(t *testing.T) {
 		t.Errorf("duplicate source: %+v with %d files, want 3", sources, len(files))
 	}
 
+	// A setting can name several places.
+	more := tree(t, map[string]string{"handbook/zfs/index.html": "<p>y</p>"})
+	cfg.RagSource = ""
+	cfg.DocsSource = docs + string(filepath.ListSeparator) + more
+	if sources, files := planIndex(cfg); len(sources) != 3 || sources[1].root != docs || sources[2].root != more || sources[2].files != 1 || len(files) != 4 {
+		t.Errorf("two documentation directories: %+v with %d files, want 4", sources, len(files))
+	}
+
 	cfg.SourcePath, cfg.DocsSource, cfg.RagSource = "", "", ""
 	if sources, files := planIndex(cfg); len(sources) != 0 || len(files) != 0 {
 		t.Errorf("no sources: %+v, %v", sources, files)
 	}
 }
 
+// Every request asks for the same context window, whatever the server's
+// default is.
 func TestSuggestContextWindow(t *testing.T) {
 	var requests []map[string]any
 	srv := fakeOllama(t, &requests)
-	for _, numCtx := range []int{0, contextWithExcerpts} {
-		if _, err := suggest(context.Background(), srv.URL+"/api/generate", "m", "system", "request", numCtx); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := suggest(context.Background(), srv.URL+"/api/generate", "m", "system", "request"); err != nil {
+		t.Fatal(err)
 	}
-	plain, sized := requests[0]["options"].(map[string]any), requests[1]["options"].(map[string]any)
-	if _, set := plain["num_ctx"]; set || sized["num_ctx"] != float64(contextWithExcerpts) {
-		t.Errorf("options were %v and %v; want num_ctx only when asked for", plain, sized)
+	options, _ := requests[0]["options"].(map[string]any)
+	if options["num_ctx"] != float64(contextTokens) || options["temperature"] != float64(0) {
+		t.Errorf("options were %v; want num_ctx %d and temperature 0", options, contextTokens)
 	}
 }

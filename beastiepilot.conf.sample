@@ -1,8 +1,11 @@
 # BeastiePilot configuration
 #
-# Copy this file to one of:
+# BeastiePilot reads this file from:
 #   ~/.config/beastiepilot/config        (your user only)
 #   /usr/local/etc/beastiepilot.conf     (everyone on the machine)
+#
+# "beastiepilot configure" creates the first one and keeps it up to date with
+# what it sets up; everything else in the file is left as you wrote it.
 #
 # Format: KEY=value, one per line, in the style of rc.conf, with keys in
 # uppercase and values in lowercase. Values may be quoted. Lines starting with
@@ -51,17 +54,20 @@
 # Where reference material lives. "beastiepilot -index" reads these places
 # into an index, and from then on the passages closest to each request are
 # shown to the model along with it. Run it again after changing them. Paths
-# must be absolute ("~" is your home directory); leave a value empty for none.
+# must be absolute ("~" is your home directory). Each setting takes one path
+# or several separated by ":", as in PATH; leave it empty for none.
 #
 # The FreeBSD source tree, as installed by the "src" component. Only its
 # manual pages for commands, devices, file formats and administration are
 # indexed, not the code.
 #SOURCE_PATH=/usr/src
 
-# The system documentation.
+# Documentation. The Handbook, FAQ and articles of the en-freebsd-doc package
+# live in /usr/local/share/doc/freebsd; "beastiepilot configure" adds that
+# place here when it installs or finds them.
 #DOCS_SOURCE=/usr/share/doc
 
-# A directory of your own notes and books: text, Markdown, HTML, manual pages,
+# Directories of your own notes and books: text, Markdown, HTML, manual pages,
 # EPUB, and PDF if pdftotext is installed.
 #RAG_SOURCE=
 

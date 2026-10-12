@@ -264,6 +264,24 @@ func TestPathSettings(t *testing.T) {
 		}
 	}
 
+	// Several places, separated like the entries of PATH.
+	for in, want := range map[string]string{
+		"/usr/share/doc:/usr/local/share/doc/freebsd": "/usr/share/doc:/usr/local/share/doc/freebsd",
+		"/a/:~/books::/a:/b/../c:":                    "/a:/home/beastie/books:/c",
+		":":                                           "",
+	} {
+		s := defaultSettings()
+		if err := s.set("DOCS_SOURCE", in); err != nil || s.DocsSource != want {
+			t.Errorf("set(DOCS_SOURCE, %q) gave (%q, %v), want %q", in, s.DocsSource, err, want)
+		}
+	}
+	for _, in := range []string{"docs", "./docs", "/a:docs", "~other/books"} {
+		s := defaultSettings()
+		if err := s.set("DOCS_SOURCE", in); err == nil {
+			t.Errorf("set(DOCS_SOURCE, %q) accepted a relative path as %q", in, s.DocsSource)
+		}
+	}
+
 	// Each key reaches its own field.
 	s := defaultSettings()
 	for key, value := range map[string]string{"SOURCE_PATH": "/a", "DOCS_SOURCE": "/b", "RAG_SOURCE": "/c"} {
@@ -273,6 +291,32 @@ func TestPathSettings(t *testing.T) {
 	}
 	if s.SourcePath != "/a" || s.DocsSource != "/b" || s.RagSource != "/c" {
 		t.Errorf("got %q, %q, %q; want /a, /b, /c", s.SourcePath, s.DocsSource, s.RagSource)
+	}
+}
+
+// get is the inverse of set: what it returns for a key sets that key to the
+// same value again. Saving settings to a file depends on it.
+func TestSettingsGet(t *testing.T) {
+	want := settings{
+		Model: "qwen2.5-coder:7b", EmbedModel: "bge-m3", Endpoint: "http://10.0.0.5:11434/api/generate",
+		Timeout: 90 * time.Second, Type: typeGuided, AutoRun: "df, zfs list, service * status", PackageManager: "ports",
+		SourcePath: "/usr/src-14", DocsSource: "/usr/share/doc:/usr/local/share/doc/freebsd", RagSource: "/home/me/My Books",
+		Banner: bannerCompact, Verbose: true,
+	}
+	got := defaultSettings()
+	for _, key := range settingKeys {
+		if want.get(key) == defaultSettings().get(key) {
+			t.Errorf("this test leaves %s at its default, which proves nothing", key)
+		}
+		if err := got.set(key, want.get(key)); err != nil {
+			t.Errorf("set(%s, %q): %v", key, want.get(key), err)
+		}
+	}
+	if got != want {
+		t.Errorf("got  %+v\nwant %+v", got, want)
+	}
+	if v := want.get("NO_SUCH_KEY"); v != "" {
+		t.Errorf("get of an unknown key gave %q", v)
 	}
 }
 

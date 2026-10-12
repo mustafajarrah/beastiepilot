@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,7 +51,7 @@ type settings struct {
 	PackageManager string        // PACKAGE_MANAGER: "pkg" or "ports"
 	SourcePath     string        // SOURCE_PATH: the FreeBSD source tree, or "" for none
 	DocsSource     string        // DOCS_SOURCE: the system documentation, or "" for none
-	RagSource      string        // RAG_SOURCE: the user's own reference files, or "" for none
+	RagSource      string        // RAG_SOURCE: the user's own reference files, or "" for none; each of the three as cleanPaths returns it
 	Banner         string        // BANNER: bannerFull, bannerCompact or bannerOff
 	Verbose        bool          // VERBOSE
 }
@@ -116,7 +117,7 @@ func (s *settings) set(key, value string) error {
 		}
 		s.AutoRun = list
 	case "SOURCE_PATH", "DOCS_SOURCE", "RAG_SOURCE":
-		p, err := cleanPath(value)
+		p, err := cleanPaths(value)
 		if err != nil {
 			return err
 		}
@@ -155,11 +156,60 @@ func (s *settings) set(key, value string) error {
 	return nil
 }
 
-// cleanPath validates a setting that names a file or directory and returns it
-// in canonical form. An empty value means none, and a leading "~" is the
-// user's home directory. Relative paths are refused, because what they name
-// would depend on the directory the program was started from. Whether the path
-// exists is not checked here: the source tree, for one, is optional.
+// get returns the setting named key in the textual form that set accepts, or
+// "" for a key that does not exist.
+func (s settings) get(key string) string {
+	switch key {
+	case "MODEL":
+		return s.Model
+	case "EMBED_MODEL":
+		return s.EmbedModel
+	case "ENDPOINT":
+		return s.Endpoint
+	case "TIMEOUT":
+		return s.Timeout.String()
+	case "TYPE":
+		return s.Type
+	case "AUTO_RUN":
+		return s.AutoRun
+	case "PACKAGE_MANAGER":
+		return s.PackageManager
+	case "SOURCE_PATH":
+		return s.SourcePath
+	case "DOCS_SOURCE":
+		return s.DocsSource
+	case "RAG_SOURCE":
+		return s.RagSource
+	case "BANNER":
+		return s.Banner
+	case "VERBOSE":
+		return strconv.FormatBool(s.Verbose)
+	}
+	return ""
+}
+
+// cleanPaths validates a setting that names places to read and returns it in
+// canonical form. The value is one path or several separated by ":", as in
+// PATH; an empty value means none.
+func cleanPaths(value string) (string, error) {
+	var paths []string
+	for _, p := range filepath.SplitList(value) {
+		p, err := cleanPath(p)
+		if err != nil {
+			return "", err
+		}
+		if p != "" {
+			paths = appendUnique(paths, p)
+		}
+	}
+	return strings.Join(paths, string(filepath.ListSeparator)), nil
+}
+
+// cleanPath validates one path of such a setting and returns it in canonical
+// form. A leading "~" is the user's home directory. Relative paths are
+// refused, because what they name would depend on the directory the program
+// was started from. Whether the path exists is not checked here: the source
+// tree, for one, is optional.
 func cleanPath(value string) (string, error) {
 	if value == "" {
 		return "", nil

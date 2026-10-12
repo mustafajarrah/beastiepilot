@@ -168,9 +168,15 @@ func TestHTMLToText(t *testing.T) {
 <body><!-- a comment --><h1>Jails</h1>
 <p>A jail is a <b>lightweight</b>
 container &amp; more.</p><script>alert("x")</script>
-<ul><li>jls&nbsp;lists them</li><li>jexec enters one</li></ul></body></html>`
+<ul><li>jls&nbsp;lists them</li><li>jexec enters one</li></ul>
+<header><nav id="menu"><ul><li>Home</li><li>Every other chapter</li></ul></nav></header>
+<pre><code># service jail start www
+# jls
+   JID  IP Address  Hostname</code></pre>
+<footer><p>All rights reserved</p></footer></body></html>`
 	got := cleanText(htmlToText(src))
-	want := "Jails\n\nA jail is a lightweight container & more.\n\njls lists them\njexec enters one"
+	want := "Jails\n\nA jail is a lightweight container & more.\n\njls lists them\njexec enters one\n\n" +
+		"# service jail start www\n# jls\n   JID  IP Address  Hostname"
 	if got != want {
 		t.Errorf("htmlToText gave:\n%q\nwant:\n%q", got, want)
 	}
@@ -240,6 +246,40 @@ func names(root string, files []candidate) string {
 		out = append(out, rel)
 	}
 	return strings.Join(out, " ")
+}
+
+// The FreeBSD documentation packages install every document as HTML pages and
+// once more as a PDF beside them. Only one of the two is read.
+func TestCollectSkipsRenditions(t *testing.T) {
+	root := tree(t, map[string]string{
+		"en/books/handbook/handbook_en.pdf":  "%PDF",
+		"en/books/handbook/zfs/index.html":   "<p>zfs</p>",
+		"en/books/handbook/jails/index.html": "<p>jails</p>",
+		"en/articles/cups/cups_en.pdf":       "%PDF",
+		"en/articles/cups/index.html":        "<p>cups</p>",
+		"pt-br/books/faq/faq_pt-br.pdf":      "%PDF",
+		"pt-br/books/faq/index.html":         "<p>faq</p>",
+		"papers/kernel_en.pdf":               "%PDF", // not named after its directory
+		"papers/papers_en.pdf":               "%PDF", // no HTML beside it
+		"books/tcpip/tcpip.pdf":              "%PDF", // no language
+		"books/tcpip/index.html":             "<p>tcp</p>",
+		"books/unix/unix_edition2.pdf":       "%PDF", // not a language
+		"books/unix/index.html":              "<p>unix</p>",
+	})
+	files, _, err := collect(root, false)
+	var pdfs []string
+	for _, name := range strings.Fields(names(root, files)) {
+		if strings.HasSuffix(name, ".pdf") {
+			pdfs = append(pdfs, name)
+		}
+	}
+	want := "books/tcpip/tcpip.pdf books/unix/unix_edition2.pdf papers/kernel_en.pdf papers/papers_en.pdf"
+	if got := strings.Join(pdfs, " "); err != nil || got != want {
+		t.Errorf("collect kept the PDFs %q (%v), want %q", got, err, want)
+	}
+	if len(files) != len(pdfs)+6 {
+		t.Errorf("collect found %d files, want the 6 HTML pages besides the PDFs", len(files))
+	}
 }
 
 func TestCollect(t *testing.T) {

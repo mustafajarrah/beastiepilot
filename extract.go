@@ -141,6 +141,9 @@ func collect(root string, manualOnly bool) (files []candidate, ignored int, err 
 		if manualOnly && (kind != kindMan || !strings.ContainsRune(manualSections, manualSection(path))) {
 			return nil
 		}
+		if kind == kindPDF && rendition(path) {
+			return nil
+		}
 		info, err := d.Info()
 		if kind == kindNone || err != nil || info.Size() > maxFileBytes {
 			if !manualOnly {
@@ -152,6 +155,34 @@ func collect(root string, manualOnly bool) (files []candidate, ignored int, err 
 		return nil
 	})
 	return files, ignored, err
+}
+
+// rendition reports whether the PDF at path is another rendering of HTML
+// documentation kept beside it, the way the FreeBSD documentation packages
+// install it: books/handbook/handbook_en.pdf next to the handbook's HTML
+// pages. Reading both would put every passage in the index twice.
+func rendition(path string) bool {
+	dir := filepath.Dir(path)
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	cut := strings.LastIndexByte(name, '_')
+	if cut < 0 || name[:cut] != filepath.Base(dir) {
+		return false
+	}
+	if lang := name[cut+1:]; len(lang) < 2 || len(lang) > 5 {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
+		return true
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() {
+			if _, err := os.Stat(filepath.Join(dir, e.Name(), "index.html")); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var (
@@ -445,7 +476,10 @@ func cutPoint(s string, max int) int {
 }
 
 var (
-	htmlHidden = regexp.MustCompile(`(?is)<script\b.*?</script\s*>|<style\b.*?</style\s*>|<head\b.*?</head\s*>|<!--.*?-->`)
+	// htmlHidden matches what is not the document's own text: code, styles,
+	// and the menus and footers a site wraps around every page.
+	htmlHidden = regexp.MustCompile(`(?is)<script\b.*?</script\s*>|<style\b.*?</style\s*>|<head\b.*?</head\s*>|<nav\b.*?</nav\s*>|<footer\b.*?</footer\s*>|<!--.*?-->`)
+	htmlPre    = regexp.MustCompile(`(?is)<pre\b.*?</pre\s*>`)
 	htmlBreak  = regexp.MustCompile(`(?i)<(?:br|/li|/tr|/dt|/dd)\b[^>]*>`)
 	htmlBlock  = regexp.MustCompile(`(?i)</?(?:p|div|h[1-6]|pre|section|article|blockquote|table|ul|ol|dl|hr)\b[^>]*>`)
 	htmlTag    = regexp.MustCompile(`(?s)<[^>]*>`)
@@ -456,6 +490,9 @@ var (
 func htmlToText(s string) string {
 	s = htmlHidden.ReplaceAllString(s, " ")
 	// Line breaks in the source are only spaces; structure comes from tags.
+	// Preformatted text is the exception: there a command on each line has to
+	// stay on its line.
+	s = htmlPre.ReplaceAllStringFunc(s, func(pre string) string { return strings.ReplaceAll(pre, "\n", "<br>") })
 	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
 	s = htmlBreak.ReplaceAllString(s, "\n")
 	s = htmlBlock.ReplaceAllString(s, "\n\n")

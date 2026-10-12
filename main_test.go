@@ -236,7 +236,7 @@ func TestSuggest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	reply, err := suggest(context.Background(), srv.URL, "llama3.2", "be strict", "list packages", 0)
+	reply, err := suggest(context.Background(), srv.URL, "llama3.2", "be strict", "list packages")
 	if err != nil || reply != "pkg info" {
 		t.Fatalf("suggest = (%q, %v), want (\"pkg info\", nil)", reply, err)
 	}
@@ -252,14 +252,14 @@ func TestSuggest(t *testing.T) {
 		"broken":  "500 Internal Server Error: boom",
 		"garbled": "decoding Ollama response",
 	} {
-		if _, err := suggest(context.Background(), srv.URL, model, "", "x", 0); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := suggest(context.Background(), srv.URL, model, "", "x"); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("model %q: error = %v, want it to mention %q", model, err, want)
 		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := suggest(ctx, srv.URL, "llama3.2", "", "x", 0); err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+	if _, err := suggest(ctx, srv.URL, "llama3.2", "", "x"); err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
 		t.Errorf("cancelled context: error = %v, want context canceled", err)
 	}
 }

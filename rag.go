@@ -9,9 +9,9 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -22,15 +22,8 @@ import (
 
 const (
 	// maxExcerpts is how many excerpts accompany a request. Each is at most
-	// chunkMax bytes, which keeps the whole prompt well inside
-	// contextWithExcerpts.
+	// chunkMax bytes, which keeps the whole prompt well inside contextTokens.
 	maxExcerpts = 3
-
-	// contextWithExcerpts is the context window, in tokens, requested from
-	// Ollama when excerpts are attached. Ollama's default can be as low as
-	// 2048, and a prompt that does not fit is cut from the top, which would
-	// silently drop the rules in systemPrompt.
-	contextWithExcerpts = 4096
 
 	// maxEmbedBytes caps the size of an embedding reply.
 	maxEmbedBytes = 256 << 20
@@ -48,13 +41,9 @@ type embedResponse struct {
 }
 
 // embedEndpoint derives the URL of Ollama's embedding API from the URL of its
-// generate API: the two are siblings.
+// generate API.
 func embedEndpoint(generate string) (string, error) {
-	u, err := url.Parse(generate)
-	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("invalid endpoint %q", generate)
-	}
-	return u.ResolveReference(&url.URL{Path: "embed"}).String(), nil
+	return apiURL(generate, "embed")
 }
 
 // embed asks the Ollama behind endpoint, the generate API URL, to embed
@@ -187,26 +176,25 @@ type sourceReport struct {
 func planIndex(cfg settings) (sources []sourceReport, files []candidate) {
 	seen := make(map[string]bool)
 	for _, src := range []struct {
-		root       string
+		roots      string
 		manualOnly bool
 	}{
 		{cfg.SourcePath, true}, // a source tree is mostly code; take its manual pages
 		{cfg.DocsSource, false},
 		{cfg.RagSource, false},
 	} {
-		if src.root == "" {
-			continue
-		}
-		found, ignored, err := collect(src.root, src.manualOnly)
-		report := sourceReport{root: src.root, ignored: ignored, err: err}
-		for _, c := range found {
-			if !seen[c.path] {
-				seen[c.path] = true
-				files = append(files, c)
-				report.files++
+		for _, root := range filepath.SplitList(src.roots) {
+			found, ignored, err := collect(root, src.manualOnly)
+			report := sourceReport{root: root, ignored: ignored, err: err}
+			for _, c := range found {
+				if !seen[c.path] {
+					seen[c.path] = true
+					files = append(files, c)
+					report.files++
+				}
 			}
+			sources = append(sources, report)
 		}
-		sources = append(sources, report)
 	}
 	return sources, files
 }
@@ -220,8 +208,10 @@ func plural(n int, noun string) string {
 }
 
 // runIndex is the -index command: it builds or updates the index from the
-// configured sources and returns the exit code.
-func runIndex(ui styler, cfg settings) int {
+// configured sources and returns the exit code. approve, if not nil, is asked
+// once the files to read are known, unless the index already holds them all;
+// when it says no, nothing is indexed.
+func runIndex(ui styler, cfg settings, approve func() bool) int {
 	path := indexPath()
 	if path == "" {
 		ui.errorf("cannot tell where to keep the index: the home directory is unknown (set XDG_CACHE_HOME)")
@@ -259,6 +249,9 @@ func runIndex(ui styler, cfg settings) int {
 	if len(files) == 0 {
 		ui.errorf("found nothing to index; an existing index, if any, was left as it is")
 		return exitError
+	}
+	if approve != nil && !upToDate(path, cfg.EmbedModel, files) && !approve() {
+		return exitOK
 	}
 
 	// Ctrl-C stops the run but keeps what has been embedded so far.

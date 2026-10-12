@@ -45,6 +45,9 @@ who wags his tail and blinks while the model is thinking; see
   pages, the system documentation and your own notes and books, and hands the
   model the passages closest to each request. See
   [Reference material](#reference-material).
+- **Sets itself up.** `beastiepilot configure` offers to install Ollama, the
+  models and the documentation and to build the index, asking before each
+  step. See [Quick start](#quick-start).
 - **Aware of its host.** The FreeBSD release, architecture, working directory
   and whether you are root are passed to the model so it can tailor the command.
 - **Pipe-friendly.** The interface is drawn on the terminal itself, so stdin and
@@ -52,7 +55,70 @@ who wags his tail and blinks while the model is thinking; see
 - **No dependencies.** A single binary built entirely from the Go standard
   library.
 
-## Prerequisites
+## Quick start
+
+On FreeBSD, as the user who will use it:
+
+```sh
+pkg install go                  # as root, to build
+go install github.com/mustafajarrah/beastiepilot@latest
+~/go/bin/beastiepilot configure
+```
+
+`configure` does the rest. It checks what the machine has and offers to
+provide what is missing, one step at a time:
+
+| Step               | What it offers                                                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Ollama             | Install the `ollama` package, enable the service and start it                                                    |
+| Model              | Download `MODEL` (`llama3.2`, about 2 GB)                                                                        |
+| Reference material | Download `EMBED_MODEL`, install the FreeBSD source tree in `/usr/src` and the Handbook, FAQ and articles         |
+| Configuration      | Save the settings it changed, or that you gave as flags, to `~/.config/beastiepilot/config`                      |
+| Index              | Read the reference material into the [index](#reference-material)                                                |
+| Program            | Copy the program to `/usr/local/bin`, when the shell cannot find it by name                                      |
+
+```console
+$ ~/go/bin/beastiepilot configure
+
+  > Setting up BeastiePilot
+    Each step says what it would do and asks first; nothing changes without
+    a yes. Run this again at any time: what is already in place is skipped.
+
+  > Ollama
+    ! Ollama, the program that runs the models, is not installed.
+      This would run, as root:
+
+        su root -c 'pkg install ollama && sysrc ollama_enable=YES && service ollama start'
+
+    ? Install Ollama and start it, now and at every boot? [y/N]
+```
+
+Things worth knowing about it:
+
+- **Nothing happens without a yes.** Every command is shown exactly as it will
+  run before the question, and anything but `y` or `yes` skips the step. `pkg`
+  is run without `-y`, so it lists what it would install and asks once more.
+- **It can be run again.** A step whose result is already in place is skipped
+  without a question, so running it again only does what is still missing.
+- **Run it as yourself, not as root.** The configuration and the index belong
+  to the user who runs it. The steps that need root go through `doas` or
+  `sudo` when one is installed, and through `su` otherwise.
+- **Your choices come from flags.** `beastiepilot -model qwen2.5-coder -type
+  guided configure` downloads that model instead and offers to save both
+  settings. An existing configuration file keeps everything else in it.
+- **The source tree** comes from the distribution set of the release you run
+  (`src.txz`, about 250 MB), or from the `FreeBSD-set-src` package when the
+  base system was installed from packages. A system that is not a release,
+  such as -CURRENT, is left for you to provide.
+- **Some steps are optional.** Only Ollama and the model are needed. Say no to
+  the reference material and BeastiePilot answers from the model alone.
+
+It exits with status 0 once BeastiePilot is ready to use, and it needs a
+terminal.
+
+## Manual installation
+
+Everything `configure` does can be done by hand.
 
 - FreeBSD (any supported release)
 - Go 1.21 or newer, to build: `pkg install go`
@@ -92,9 +158,9 @@ model:
 ollama pull nomic-embed-text
 ```
 
-## Installation
+### Building BeastiePilot
 
-### With `go install`
+With `go install`:
 
 ```sh
 go install github.com/mustafajarrah/beastiepilot@latest
@@ -103,7 +169,7 @@ go install github.com/mustafajarrah/beastiepilot@latest
 The binary is placed in `$(go env GOPATH)/bin` (usually `~/go/bin`). Make sure
 that directory is on your `PATH`.
 
-### From source
+From source:
 
 ```sh
 git clone https://github.com/mustafajarrah/beastiepilot.git
@@ -124,11 +190,18 @@ go build -ldflags "-X main.version=v0.1.0" -o beastiepilot .
 
 ```
 beastiepilot [flags] <what you want to do>
+beastiepilot [flags] configure
+beastiepilot [flags] -index
 ```
 
 Everything after the flags is joined into a single request, so quoting is
 optional. Do quote the request when it contains characters your shell would
 interpret, such as `?`, `*`, `'` or `|`.
+
+The single word `configure` is not sent to the model: it runs the
+[setup](#quick-start). A longer request that starts with it, such as
+`beastiepilot configure nginx to listen on port 8080`, is a request like any
+other.
 
 ### Examples
 
@@ -330,7 +403,7 @@ Every setting has a key for the file, an environment variable and a flag.
 | `AUTO_RUN`        | `BEASTIEPILOT_AUTO_RUN`        | `-auto-run`        | *(empty)*                             | Commands `safe` mode runs without asking, comma-separated     |
 | `PACKAGE_MANAGER` | `BEASTIEPILOT_PACKAGE_MANAGER` | `-package-manager` | `pkg`                                 | Install software with `pkg` (binary packages) or `ports`      |
 | `SOURCE_PATH`     | `BEASTIEPILOT_SOURCE_PATH`     | `-source-path`     | `/usr/src`                            | FreeBSD source tree to index; see [Reference material](#reference-material) |
-| `DOCS_SOURCE`     | `BEASTIEPILOT_DOCS_SOURCE`     | `-docs-source`     | `/usr/share/doc`                      | System documentation to index                                 |
+| `DOCS_SOURCE`     | `BEASTIEPILOT_DOCS_SOURCE`     | `-docs-source`     | `/usr/share/doc`                      | Documentation to index; several places are separated by `:`   |
 | `RAG_SOURCE`      | `BEASTIEPILOT_RAG_SOURCE`      | `-rag-source`      | *(empty)*                             | Your own files and books to index                             |
 | `BANNER`          | `BEASTIEPILOT_BANNER`          | `-no-banner`       | `full`                                | `full`, `compact` or `off`; see [The banner](#the-banner)     |
 | `VERBOSE`         | `BEASTIEPILOT_VERBOSE`         | `-verbose`         | `false`                               | Show the configuration, endpoint, model, timing and raw reply |
@@ -345,6 +418,7 @@ Other flags and variables:
 | Name                                  | Description                                                |
 | ------------------------------------- | ---------------------------------------------------------- |
 | `-config FILE`, `BEASTIEPILOT_CONFIG` | Read only this file instead of the two default locations   |
+| `configure`                           | Set the machine up, step by step; see [Quick start](#quick-start) |
 | `-index`                              | Build or update the index of reference material, then exit |
 | `-version`                            | Print the version and exit                                 |
 | `NO_COLOR`                            | Disable colored output when set                            |
@@ -366,6 +440,9 @@ to the model along with it.
 ollama pull nomic-embed-text    # once
 beastiepilot -index
 ```
+
+`beastiepilot configure` does both, and installs the material to read if you
+let it.
 
 ```console
 $ beastiepilot -index
@@ -389,27 +466,38 @@ $ beastiepilot -index
 | ------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `SOURCE_PATH` | `/usr/src`       | The manual pages for commands, devices, file formats and administration (sections 1, 4, 5, 7 and 8). The code is not indexed. |
 | `DOCS_SOURCE` | `/usr/share/doc` | Every file in a format listed below                                                                                     |
-| `RAG_SOURCE`  | *(empty)*        | The same, for a directory of your own: notes, runbooks, books                                                           |
+| `RAG_SOURCE`  | *(empty)*        | The same, for directories of your own: notes, runbooks, books                                                           |
 
-Paths must be absolute; `~` stands for your home directory, an empty value
-means none, and a place that does not exist is skipped. If the source tree is
-not installed, the installed manual pages do the same job: set `DOCS_SOURCE`
-or `RAG_SOURCE` to `/usr/share/man`. That takes every section, so the index is
-larger.
+Each takes one path or several separated by `:`, as in `PATH`. Paths must be
+absolute; `~` stands for your home directory, an empty value means none, and a
+place that does not exist is skipped.
+
+The Handbook, the FAQ and the articles are not part of the base system: they
+come with the `en-freebsd-doc` package, in `/usr/local/share/doc/freebsd`.
+`beastiepilot configure` offers to install it and then sets
+`DOCS_SOURCE=/usr/share/doc:/usr/local/share/doc/freebsd`.
+
+If the source tree is not installed, the installed manual pages do the same
+job: add `/usr/share/man` to `DOCS_SOURCE`. That takes every section, so the
+index is larger.
 
 **Formats.** Plain text and Markdown (`.txt`, `.md`, `.rst`, `.adoc`, `.org`
 and files with no extension), manual pages, HTML and EPUB, all of them also
 when gzipped. PDF is read if `pdftotext` is installed
 (`pkg install poppler-utils`); otherwise PDF files are skipped and the index
-command says so.
+command says so. Of an HTML page, the menus and footers around the text are
+left out. A PDF that is the same document again, the way the FreeBSD
+documentation packages put `handbook_en.pdf` beside the Handbook's HTML pages,
+is not read at all.
 
 **How it works.** Each file is turned into text and cut into excerpts of about
 a thousand characters. `EMBED_MODEL` turns every excerpt into a vector, and
 the vectors are stored in `~/.cache/beastiepilot/index` (or under
 `$XDG_CACHE_HOME`). For each request BeastiePilot embeds the request, finds the
-three closest excerpts and appends them to the system prompt, asking Ollama for
-a 4096-token context so that everything fits. `-verbose` shows which excerpts
-were used and how similar they were.
+three closest excerpts and appends them to the system prompt. `-verbose` shows
+which excerpts were used and how similar they were. Every request asks Ollama
+for a context of 4096 tokens, which holds all of that, whatever the server's
+own default is.
 
 **Keeping it current.** Run `beastiepilot -index` again after adding files or
 upgrading the system. Only new and changed files are embedded, and a run you
@@ -489,6 +577,12 @@ prompt only steers the model; the protections below are enforced in code.
 - **No sandbox, no privilege changes.** Commands run through `/bin/sh -c` with
   the privileges of the user who invoked BeastiePilot. Avoid running it as root
   unless the task requires it.
+- **`configure` is the one place that asks for root.** Its commands are fixed
+  in the program, not written by the model: installing packages, enabling the
+  Ollama service, unpacking the source tree, copying the program. Each is
+  shown and needs a yes, and it is `doas`, `sudo` or `su` that asks for the
+  password, not BeastiePilot. The source tree is downloaded over HTTPS from
+  `download.FreeBSD.org`, without the checksum comparison the installer makes.
 
 ### What is sent to the model
 
@@ -516,9 +610,10 @@ go test ./...
 The tests cover the parts that guard execution (cleaning and validating the
 model's reply, the risk heuristics, the `AUTO_RUN` matcher, the confirmation
 prompt), the configuration loader, the Ollama client, the index (reading
-files, building, updating and searching it) and the banner's rendering. They
-use a stand-in for the embedding model, so they say nothing about how well a
-real one retrieves.
+files, building, updating and searching it), the setup and the banner's
+rendering. They use a stand-in for the embedding model, so they say nothing
+about how well a real one retrieves, and a stand-in for the machine, so the
+setup's commands are checked for what they are, not run.
 
 ## License
 

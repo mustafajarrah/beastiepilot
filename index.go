@@ -349,6 +349,29 @@ func (w *indexWriter) finish(path string) (int64, error) {
 	return info.Size(), os.Rename(out.Name(), path)
 }
 
+// upToDate reports whether the index at path already holds exactly files, as
+// embedded by model, so that building it again would change nothing.
+func upToDate(path, model string, files []candidate) bool {
+	ix, err := openIndex(path)
+	if err != nil {
+		return false
+	}
+	defer ix.close()
+	if ix.header.Model != model || len(ix.header.Files) != len(files) {
+		return false
+	}
+	have := make(map[string]indexedFile, len(ix.header.Files))
+	for _, f := range ix.header.Files {
+		have[f.Path] = f
+	}
+	for _, c := range files {
+		if f, ok := have[c.path]; !ok || f.Size != c.size || f.MTime != c.mtime {
+			return false
+		}
+	}
+	return true
+}
+
 // embedFunc returns one unit-length vector for each input text.
 type embedFunc func(ctx context.Context, inputs []string) ([][]float32, error)
 
