@@ -1,8 +1,9 @@
 // Command beastiepilot is an AI-powered terminal assistant for FreeBSD.
 //
 // It sends a natural language request to a local LLM served by Ollama, prints
-// the shell command the model suggests, and runs it through /bin/sh only after
-// the user explicitly confirms on the terminal.
+// the shell command the model suggests, and runs it through /bin/sh once the
+// user explicitly confirms on the terminal. The TYPE setting can add an
+// explanation, and AUTO_RUN can name commands that need no confirmation.
 package main
 
 import (
@@ -14,7 +15,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -34,9 +34,10 @@ import (
 var version = "dev"
 
 const (
-	defaultEndpoint = "http://localhost:11434/api/generate"
-	defaultModel    = "llama3.2"
-	defaultTimeout  = 2 * time.Minute
+	defaultEndpoint   = "http://localhost:11434/api/generate"
+	defaultModel      = "llama3.2"
+	defaultEmbedModel = "nomic-embed-text"
+	defaultTimeout    = 2 * time.Minute
 
 	// maxResponseBytes caps how much of an Ollama reply is read. A shell
 	// command is tiny; anything near this size is a misbehaving server.
@@ -52,12 +53,15 @@ const (
 	exitInterrupted = 130
 )
 
+// maxExplanationLines caps how much of a guided-mode explanation is shown.
+const maxExplanationLines = 12
+
 // systemPrompt pins the model to FreeBSD and to machine-readable output. The
 // "# reason" escape hatch gives it a harmless way to decline, which run
 // detects and reports instead of offering it for execution.
 //
 // The prompt only steers the model. Nothing here is a security control: those
-// live in validateCommand, inspect and confirm.
+// live in validateCommand, inspect, autoRun and confirm.
 const systemPrompt = `You are BeastiePilot, an expert FreeBSD system administrator. Translate the user's request into one shell command for FreeBSD's /bin/sh.
 
 OUTPUT FORMAT (strict):
@@ -85,6 +89,17 @@ SAFETY:
 - Append to configuration files with >>, never overwrite them with >. Prefer sysrc for rc.conf.
 - Do not prefix commands with sudo or doas; the user runs this tool with the privileges they intend.`
 
+// explainPrompt is the system prompt for the second request made in guided
+// mode. Its answer is only ever displayed, never executed.
+const explainPrompt = `You are BeastiePilot, a patient FreeBSD mentor. The user asked for something and was given the shell command shown below. Explain it so that they can decide whether to run it.
+
+- Start with one sentence saying what the command does overall and why it answers the request.
+- Then one short line for each part that matters (each command, option and argument), saying what it is for.
+- End with one line that starts with "Effect:" and says what will change on the system, or that nothing changes if the command only reads information.
+- Plain text only: no markdown, no code fences, no headings. At most 8 lines in total.
+- Write in the same language as the user's request.
+- Do not suggest a different command.`
+
 // generateRequest is the subset of Ollama's /api/generate request body used here.
 type generateRequest struct {
 	Model   string         `json:"model"`
@@ -110,62 +125,6 @@ const (
 	boldCyan   = "1;36"
 	lens       = "1;33;46" // goggle frame over cyan glass
 )
-
-// mascot is a banner picture: rows of characters and, for each character, a
-// letter choosing its color from mascotColors.
-type mascot struct {
-	rows    []string
-	colors  []string
-	infoRow int // first row that has text beside it
-}
-
-// mascotColors maps the letters in mascot.colors to SGR codes: Beastie is
-// red, his pilot cap and goggles are yellow.
-var mascotColors = map[byte]string{'r': boldRed, 'y': boldYellow, 'g': lens}
-
-// beastieBlocks is Beastie in a pilot cap, drawn with quadrant block
-// characters so that every character cell holds two "pixels" each way. The
-// goggle lenses are the lower halves of the 'g' cells.
-var beastieBlocks = mascot{
-	rows: []string{
-		"█▖ ▗▄▄▖ ▗█",
-		"▝█▟████▙█▘",
-		" ██▀██▀██ ",
-		" ▀██▀▀██▀ ",
-	},
-	colors: []string{
-		"rr yyyy rr",
-		"rryyyyyyrr",
-		" rygyygyr ",
-		" rrrrrrrr ",
-	},
-}
-
-// beastieASCII is the same pilot for terminals without a UTF-8 locale, such
-// as the FreeBSD console in the C locale.
-var beastieASCII = mascot{
-	rows: []string{
-		` ,          ,`,
-		`/(   ____   )\`,
-		`\ \.'    './ /`,
-		` \/ ______ \/`,
-		` | (O)==(O) |`,
-		` |   o  o   |`,
-		`  \  \__/  /`,
-		`   '-.__.-'`,
-	},
-	colors: []string{
-		` r          r`,
-		`rr   yyyy   rr`,
-		`r ryy    yyr r`,
-		` rr yyyyyy rr`,
-		` r yyyyyyyy r`,
-		` r   r  r   r`,
-		`  r  rrrr  r`,
-		`   rrrrrrrr`,
-	},
-	infoRow: 2,
-}
 
 // styler draws the interface. It writes to the controlling terminal when
 // there is one and to stderr otherwise; never to stdout, which is reserved
@@ -214,10 +173,21 @@ func main() {
 }
 
 func run() int {
-	endpoint := flag.String("endpoint", envOr("BEASTIEPILOT_ENDPOINT", defaultEndpoint), "Ollama generate API `url`")
-	model := flag.String("model", envOr("BEASTIEPILOT_MODEL", defaultModel), "Ollama model `name`")
-	timeout := flag.Duration("timeout", defaultTimeout, "how long to wait for the model")
-	noBanner := flag.Bool("no-banner", os.Getenv("BEASTIEPILOT_NO_BANNER") != "", "do not draw the Beastie banner")
+	def := defaultSettings()
+	flag.String("model", def.Model, "Ollama model `name`")
+	flag.String("embed-model", def.EmbedModel, "Ollama embedding model `name`, for the index")
+	flag.String("endpoint", def.Endpoint, "Ollama generate API `url`")
+	flag.Duration("timeout", def.Timeout, "how long to wait for the model")
+	flag.String("type", def.Type, "what to do with a suggestion: `guided|safe`")
+	flag.String("auto-run", def.AutoRun, "comma-separated `commands` that safe mode runs without asking")
+	flag.String("package-manager", def.PackageManager, "install software with `pkg|ports`")
+	flag.String("source-path", def.SourcePath, "`directory` holding the FreeBSD source tree")
+	flag.String("docs-source", def.DocsSource, "`directory` holding the system documentation")
+	flag.String("rag-source", def.RagSource, "`directory` holding your own reference files and books")
+	flag.Bool("verbose", false, "show how the suggestion was obtained")
+	noBanner := flag.Bool("no-banner", false, "do not draw the Beastie banner")
+	configPath := flag.String("config", "", "read settings from `file` instead of the default locations")
+	buildIdx := flag.Bool("index", false, "build or update the index of reference material, then exit")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Usage = usage
 	flag.Parse()
@@ -228,7 +198,8 @@ func run() int {
 	}
 
 	intent := strings.TrimSpace(strings.Join(flag.Args(), " "))
-	if intent == "" {
+	if (intent == "") != *buildIdx {
+		// A request and -index exclude each other, and one of them is needed.
 		usage()
 		return exitUsage
 	}
@@ -245,39 +216,67 @@ func run() int {
 	}
 	ui := newStyler(tty)
 
-	if ui.tty && !*noBanner {
-		printBanner(ui, *model, *endpoint)
+	// Settings come from the defaults, then the configuration files, then the
+	// environment; flags given on the command line override them all.
+	cfg, configFiles, err := loadSettings(*configPath)
+	flagKeys := map[string]string{
+		"model": "MODEL", "embed-model": "EMBED_MODEL", "endpoint": "ENDPOINT", "timeout": "TIMEOUT", "type": "TYPE",
+		"auto-run": "AUTO_RUN", "package-manager": "PACKAGE_MANAGER", "verbose": "VERBOSE",
+		"source-path": "SOURCE_PATH", "docs-source": "DOCS_SOURCE", "rag-source": "RAG_SOURCE",
 	}
-
-	// Let Ctrl-C abort a slow model instead of leaving the user waiting.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	ctx, cancel := context.WithTimeout(ctx, *timeout)
-	defer cancel()
-
-	if ui.tty {
-		fmt.Fprint(ui.out, ui.paint(dim, fmt.Sprintf("  Asking %s ...", *model)))
-	}
-	reply, err := suggest(ctx, *endpoint, *model, systemPrompt+hostContext(), intent)
-	if ui.tty {
-		fmt.Fprint(ui.out, "\r\033[K") // erase the status line
-	}
-	// Restore default signal handling so Ctrl-C works at the prompt below.
-	stop()
-
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		ui.errorf("no answer from %s within %s (raise it with -timeout)", *model, *timeout)
-		return exitError
-	case errors.Is(err, context.Canceled):
-		ui.errorf("interrupted")
-		return exitInterrupted
-	case err != nil:
+	flag.Visit(func(f *flag.Flag) {
+		if key, ok := flagKeys[f.Name]; ok && err == nil {
+			if setErr := cfg.set(key, f.Value.String()); setErr != nil {
+				err = fmt.Errorf("-%s: %w", f.Name, setErr)
+			}
+		}
+	})
+	if err != nil {
 		ui.errorf("%v", err)
-		return exitError
+		return exitUsage
+	}
+	if *noBanner {
+		cfg.Banner = bannerOff
+	}
+
+	var art bannerArt
+	if ui.tty && cfg.Banner != bannerOff {
+		art = printBanner(ui, cfg)
+	}
+
+	if *buildIdx {
+		return runIndex(ui, cfg)
+	}
+
+	// With an index, look up the documentation closest to the request and
+	// let the model read it. Failing to is not fatal: the model can still
+	// answer from what it knows, and the user is told.
+	var excerpts []hit
+	var retrieveErr error
+	if _, statErr := os.Stat(indexPath()); statErr == nil {
+		_, retrieveErr = waiting(ui, cfg, art.animated, "Searching the reference material", func(ctx context.Context) (err error) {
+			excerpts, err = retrieve(ctx, cfg, intent)
+			return err
+		})
+		if errors.Is(retrieveErr, context.Canceled) {
+			return queryFailure(ui, cfg, retrieveErr)
+		}
+	}
+
+	system := systemPrompt + cfg.promptPreferences() + hostContext() + referenceSection(excerpts)
+	numCtx := 0
+	if len(excerpts) > 0 {
+		numCtx = contextWithExcerpts
+	}
+	reply, elapsed, err := ask(ui, cfg, art.animated, "Asking "+cfg.Model, system, intent, numCtx)
+	if err != nil {
+		return queryFailure(ui, cfg, err)
 	}
 
 	command := cleanCommand(reply)
+	if cfg.Verbose {
+		printDetails(ui, cfg, configFiles, elapsed, reply, command, excerpts)
+	}
 	if err := validateCommand(command); err != nil {
 		ui.errorf("%v", err)
 		return exitError
@@ -289,17 +288,57 @@ func run() int {
 
 	rev := inspect(command)
 	rev.notices = append(rev.notices, hostNotices()...)
-	printSuggestion(ui, *model, command, rev)
+	if retrieveErr != nil {
+		reason := retrieveErr.Error()
+		if errors.Is(retrieveErr, context.DeadlineExceeded) {
+			reason = fmt.Sprintf("%s did not answer within %s", cfg.EmbedModel, cfg.Timeout)
+		}
+		rev.notices = append(rev.notices, "The reference material was not consulted: "+reason)
+	}
+	printSuggestion(ui, cfg.Model, command, rev)
 
-	if tty == nil {
+	if cfg.Type == typeGuided {
+		raw, _, err := ask(ui, cfg, false, "Explaining the command", explainPrompt, "Request: "+intent+"\nCommand: "+command, 0)
+		explanation := cleanExplanation(raw)
+		switch {
+		case errors.Is(err, context.Canceled):
+			return queryFailure(ui, cfg, err)
+		case err != nil || explanation == "":
+			// The command is still valid; the user decides without the commentary.
+			fmt.Fprintf(ui.out, "  %s %s\n\n", ui.paint(boldYellow, "!"), "The model gave no explanation for this command.")
+		default:
+			printExplanation(ui, explanation)
+		}
+	}
+
+	// Decide whether to run it. The question is skipped only in safe mode, for
+	// a command made entirely of AUTO_RUN entries that inspect did not flag as
+	// destructive.
+	destructive := len(rev.dangers) > 0
+	auto, why := false, ""
+	switch {
+	case cfg.Type != typeSafe || cfg.AutoRun == "":
+	case destructive:
+		why = "it looks destructive"
+	default:
+		auto, why = autoRun(command, cfg.autoRunList())
+	}
+	if cfg.Verbose && why != "" {
+		fmt.Fprintf(ui.out, "  %s\n\n", ui.paint(dim, "Not run automatically because "+why+"."))
+	}
+	switch {
+	case auto:
+		fmt.Fprintf(ui.out, "  %s %s\n\n", ui.paint(boldYellow, "!"), "Listed in AUTO_RUN: running without confirmation.")
+	case tty == nil:
 		ui.errorf("no terminal available to ask for confirmation; nothing was executed")
 		return exitError
+	default:
+		if !confirm(ui, tty, destructive) {
+			fmt.Fprintf(ui.out, "  %s\n", ui.paint(dim, "Aborted. Nothing was executed."))
+			return exitOK
+		}
+		fmt.Fprintln(ui.out)
 	}
-	if !confirm(ui, tty, len(rev.dangers) > 0) {
-		fmt.Fprintf(ui.out, "  %s\n", ui.paint(dim, "Aborted. Nothing was executed."))
-		return exitOK
-	}
-	fmt.Fprintln(ui.out)
 
 	code, err := execute(command)
 	if err != nil {
@@ -309,12 +348,71 @@ func run() int {
 	return code
 }
 
+// ask sends one request to the model and returns its raw reply and how long
+// it took. numCtx, if not zero, is the context window to request.
+func ask(ui styler, cfg settings, animate bool, status, system, prompt string, numCtx int) (string, time.Duration, error) {
+	var reply string
+	elapsed, err := waiting(ui, cfg, animate, status, func(ctx context.Context) (err error) {
+		reply, err = suggest(ctx, cfg.Endpoint, cfg.Model, system, prompt, numCtx)
+		return err
+	})
+	return reply, elapsed, err
+}
+
+// waiting runs request, which talks to Ollama, and returns how long it took.
+// Meanwhile it shows status on the terminal, animating the banner printed
+// just above when animate is set. request is cancelled by Ctrl-C and after
+// TIMEOUT.
+func waiting(ui styler, cfg settings, animate bool, status string, request func(context.Context) error) (time.Duration, error) {
+	// Let Ctrl-C abort a slow model instead of leaving the user waiting. The
+	// handler is removed on return, so Ctrl-C works normally at the prompt.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+
+	if ui.tty {
+		defer fmt.Fprint(ui.out, "\r\033[K") // erase the status line, after the animation has stopped
+		if animate {
+			defer startAnimation(ui, status).stop()
+		} else {
+			fmt.Fprint(ui.out, ui.paint(dim, bannerIndent+status+" ..."))
+		}
+	}
+
+	start := time.Now()
+	err := request(ctx)
+	return time.Since(start), err
+}
+
+// queryFailure reports why a request to the model failed and returns the exit
+// code to finish with.
+func queryFailure(ui styler, cfg settings, err error) int {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		ui.errorf("no answer from %s within %s (raise TIMEOUT or pass -timeout)", cfg.Model, cfg.Timeout)
+		return exitError
+	case errors.Is(err, context.Canceled):
+		ui.errorf("interrupted")
+		return exitInterrupted
+	default:
+		ui.errorf("%v", err)
+		return exitError
+	}
+}
+
 func usage() {
 	out := flag.CommandLine.Output()
 	fmt.Fprint(out, `Usage: beastiepilot [flags] <what you want to do>
+       beastiepilot [flags] -index
 
 Translates a plain-language request into a FreeBSD shell command using a local
-Ollama model, then asks for confirmation before running it.
+Ollama model, then asks for confirmation before running it. With -type guided
+it also explains the command. Commands listed in AUTO_RUN run without asking.
+
+With -index it reads the manual pages, documentation and files of your own
+under SOURCE_PATH, DOCS_SOURCE and RAG_SOURCE into an index. From then on the
+passages closest to each request are given to the model along with it.
 
 Examples:
   beastiepilot install nginx and enable it at boot
@@ -327,22 +425,17 @@ Quote the request if it contains characters your shell would interpret
 Flags:
 `)
 	flag.PrintDefaults()
-	fmt.Fprint(out, `
-Environment:
-  BEASTIEPILOT_ENDPOINT   default for -endpoint
-  BEASTIEPILOT_MODEL      default for -model
-  BEASTIEPILOT_NO_BANNER  hide the banner when set
-  NO_COLOR                disable colored output when set
-`)
-}
+	fmt.Fprintf(out, `
+Configuration:
+  Settings are read from %s and then
+  %s, as KEY=value lines.
+  Keys: %s.
+  Each can also be set as BEASTIEPILOT_<KEY> in the environment; flags win.
 
-// envOr returns the value of the environment variable key, or fallback if it
-// is unset or empty.
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+Environment:
+  BEASTIEPILOT_CONFIG  read this file instead of the default locations
+  NO_COLOR             disable colored output when set
+`, systemConfigPath, userConfigPath(), strings.Join(wrap(strings.Join(settingKeys, ", "), 70), "\n        "))
 }
 
 // buildVersion prefers the linker-provided version and falls back to the
@@ -355,98 +448,6 @@ func buildVersion() string {
 		return info.Main.Version
 	}
 	return version
-}
-
-// printBanner draws Beastie with the version, the model in use and the
-// working directory beside him.
-func printBanner(ui styler, model, endpoint string) {
-	art, sep := beastieASCII, " - "
-	if utf8Locale() {
-		art, sep = beastieBlocks, " · "
-	}
-	info := []string{
-		ui.paint(bold, "BeastiePilot") + " " + ui.paint(dim, bannerVersion()),
-		model + sep + endpointHost(endpoint),
-		ui.paint(dim, shortWorkingDir()),
-	}
-
-	width := 0
-	for _, row := range art.rows {
-		if n := utf8.RuneCountInString(row); n > width {
-			width = n
-		}
-	}
-
-	fmt.Fprintln(ui.out)
-	for i := range art.rows {
-		line, n := art.render(ui, i)
-		if j := i - art.infoRow; j >= 0 && j < len(info) {
-			line += strings.Repeat(" ", width-n+3) + info[j]
-		}
-		fmt.Fprintln(ui.out, "  "+strings.TrimRight(line, " "))
-	}
-	fmt.Fprintln(ui.out)
-}
-
-// render returns row i of the mascot with its colors applied, and the row's
-// width in columns.
-func (m mascot) render(ui styler, i int) (string, int) {
-	cells := []rune(m.rows[i])
-	var b strings.Builder
-	for j, c := range cells {
-		code := ""
-		if j < len(m.colors[i]) {
-			code = mascotColors[m.colors[i][j]]
-		}
-		if code == "" {
-			b.WriteRune(c)
-		} else {
-			b.WriteString(ui.paint(code, string(c)))
-		}
-	}
-	return b.String(), len(cells)
-}
-
-// utf8Locale reports whether the environment selects a UTF-8 locale, checking
-// the variables in the order the C library does.
-func utf8Locale() bool {
-	for _, key := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
-		if v := strings.ToUpper(os.Getenv(key)); v != "" {
-			return strings.Contains(v, "UTF-8") || strings.Contains(v, "UTF8")
-		}
-	}
-	return false
-}
-
-// bannerVersion is buildVersion, with the long pseudo-version Go assigns to
-// untagged builds shortened to "dev".
-func bannerVersion() string {
-	v := buildVersion()
-	if strings.HasPrefix(v, "v0.0.0-") {
-		return "dev"
-	}
-	return v
-}
-
-// endpointHost returns the host:port part of the Ollama endpoint URL.
-func endpointHost(endpoint string) string {
-	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
-		return u.Host
-	}
-	return endpoint
-}
-
-// shortWorkingDir returns the working directory with the user's home
-// directory abbreviated to "~".
-func shortWorkingDir() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "/" && (wd == home || strings.HasPrefix(wd, home+"/")) {
-		return "~" + wd[len(home):]
-	}
-	return wd
 }
 
 // hostContext describes the machine to the model so that it can tailor the
@@ -484,14 +485,19 @@ func hostNotices() []string {
 
 // suggest asks the Ollama model at endpoint to translate intent into a shell
 // command under the given system prompt and returns the model's raw reply.
-func suggest(ctx context.Context, endpoint, model, system, intent string) (string, error) {
+// numCtx, if not zero, sets the size of the model's context window in tokens.
+func suggest(ctx context.Context, endpoint, model, system, intent string, numCtx int) (string, error) {
+	// Temperature 0 keeps suggestions as deterministic as the model allows.
+	options := map[string]any{"temperature": 0}
+	if numCtx > 0 {
+		options["num_ctx"] = numCtx
+	}
 	body, err := json.Marshal(generateRequest{
-		Model:  model,
-		System: system,
-		Prompt: intent,
-		Stream: false,
-		// Temperature 0 keeps suggestions as deterministic as the model allows.
-		Options: map[string]any{"temperature": 0},
+		Model:   model,
+		System:  system,
+		Prompt:  intent,
+		Stream:  false,
+		Options: options,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encoding request: %w", err)
@@ -539,12 +545,7 @@ func suggest(ctx context.Context, endpoint, model, system, intent string) (strin
 // cleanCommand strips the decoration models tend to add despite being told
 // not to: reasoning blocks, Markdown code fences, backticks and "$ " prompts.
 func cleanCommand(s string) string {
-	s = strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
-
-	// Reasoning models may emit their scratchpad first; keep what follows it.
-	if i := strings.LastIndex(s, "</think>"); i >= 0 {
-		s = strings.TrimSpace(s[i+len("</think>"):])
-	}
+	s = afterReasoning(strings.ReplaceAll(s, "\r\n", "\n"))
 
 	// A fenced block: drop the opening line (fence plus optional language
 	// tag) and the closing fence.
@@ -563,6 +564,69 @@ func cleanCommand(s string) string {
 	}
 
 	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "$ "))
+}
+
+// afterReasoning drops the scratchpad some reasoning models emit before their
+// answer and returns what follows it, trimmed.
+func afterReasoning(s string) string {
+	if i := strings.LastIndex(s, "</think>"); i >= 0 {
+		s = s[i+len("</think>"):]
+	}
+	return strings.TrimSpace(s)
+}
+
+// cleanExplanation prepares a guided-mode explanation for display. Unlike a
+// command it is never executed, so instead of being rejected it is simply
+// stripped of anything that could drive the terminal, of Markdown decoration
+// and of blank lines, and cut to maxExplanationLines.
+func cleanExplanation(s string) string {
+	s = afterReasoning(strings.ReplaceAll(s, "\r\n", "\n"))
+	s = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n':
+			return r
+		case r == '\t':
+			return ' '
+		case !unicode.IsPrint(r):
+			return -1
+		}
+		return r
+	}, s)
+	s = strings.NewReplacer("**", "", "`", "").Replace(s)
+
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+		if len(lines) == maxExplanationLines {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// wrap breaks text into lines of at most width columns at word boundaries,
+// keeping the line breaks it already has. A word longer than width gets a
+// line of its own.
+func wrap(text string, width int) []string {
+	var lines []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		line := ""
+		for _, word := range strings.Fields(paragraph) {
+			switch {
+			case line == "":
+				line = word
+			case utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= width:
+				line += " " + word
+			default:
+				lines = append(lines, line)
+				line = word
+			}
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // validateCommand rejects replies that cannot be shown to the user faithfully.
@@ -801,6 +865,35 @@ func appendUnique(list []string, s string) []string {
 	return append(list, s)
 }
 
+// printDetails shows, for VERBOSE, where the suggestion came from. The raw
+// reply is quoted so that nothing in it can affect the terminal.
+func printDetails(ui styler, cfg settings, configFiles []string, elapsed time.Duration, reply, command string, excerpts []hit) {
+	config := "none (defaults)"
+	if len(configFiles) > 0 {
+		config = strings.Join(configFiles, ", ")
+	}
+	rows := [][2]string{
+		{"config", config},
+		{"endpoint", cfg.Endpoint},
+		{"model", fmt.Sprintf("%s, answered in %s", cfg.Model, elapsed.Round(10*time.Millisecond))},
+		{"packages", cfg.PackageManager},
+	}
+	if cfg.AutoRun != "" {
+		rows = append(rows, [2]string{"auto-run", cfg.AutoRun})
+	}
+	for _, e := range excerpts {
+		// Excerpts were cleaned of control characters when they were indexed.
+		rows = append(rows, [2]string{"reference", fmt.Sprintf("%s (%.2f) %s", docTitle(e.path), e.score, e.path)})
+	}
+	if strings.TrimSpace(reply) != command {
+		rows = append(rows, [2]string{"raw reply", fmt.Sprintf("%q", reply)})
+	}
+	fmt.Fprintln(ui.out)
+	for _, row := range rows {
+		fmt.Fprintf(ui.out, "  %s\n", ui.paint(dim, fmt.Sprintf("%-10s %s", row[0], row[1])))
+	}
+}
+
 // printSuggestion displays the command exactly as it will be passed to
 // /bin/sh, followed by anything inspect found.
 func printSuggestion(ui styler, model, command string, rev review) {
@@ -822,6 +915,25 @@ func printSuggestion(ui styler, model, command string, rev review) {
 	if len(rev.dangers)+len(rev.notices) > 0 {
 		fmt.Fprintln(ui.out)
 	}
+}
+
+// printExplanation shows the model's account of the suggested command,
+// wrapped to fit the terminal.
+func printExplanation(ui styler, explanation string) {
+	width := 76
+	if f, ok := ui.out.(*os.File); ok {
+		if cols, _, ok := termSize(f); ok && cols-6 < width {
+			width = cols - 6
+		}
+	}
+	if width < 20 {
+		width = 20
+	}
+	fmt.Fprintf(ui.out, "  %s %s\n\n", ui.paint(boldCyan, ">"), ui.paint(bold, "Why this command"))
+	for _, line := range wrap(explanation, width) {
+		fmt.Fprintf(ui.out, "    %s\n", line)
+	}
+	fmt.Fprintln(ui.out)
 }
 
 // confirm asks the user whether to run the suggested command, reading the

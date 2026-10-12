@@ -236,7 +236,7 @@ func TestSuggest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	reply, err := suggest(context.Background(), srv.URL, "llama3.2", "be strict", "list packages")
+	reply, err := suggest(context.Background(), srv.URL, "llama3.2", "be strict", "list packages", 0)
 	if err != nil || reply != "pkg info" {
 		t.Fatalf("suggest = (%q, %v), want (\"pkg info\", nil)", reply, err)
 	}
@@ -252,14 +252,14 @@ func TestSuggest(t *testing.T) {
 		"broken":  "500 Internal Server Error: boom",
 		"garbled": "decoding Ollama response",
 	} {
-		if _, err := suggest(context.Background(), srv.URL, model, "", "x"); err == nil || !strings.Contains(err.Error(), want) {
+		if _, err := suggest(context.Background(), srv.URL, model, "", "x", 0); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("model %q: error = %v, want it to mention %q", model, err, want)
 		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := suggest(ctx, srv.URL, "llama3.2", "", "x"); err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+	if _, err := suggest(ctx, srv.URL, "llama3.2", "", "x", 0); err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
 		t.Errorf("cancelled context: error = %v, want context canceled", err)
 	}
 }
@@ -272,13 +272,62 @@ func TestSystemPromptCoversFreeBSDTools(t *testing.T) {
 	}
 }
 
+func TestCleanExplanation(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"plain", "Lists jails.\nEffect: nothing changes.", "Lists jails.\nEffect: nothing changes."},
+		{"markdown", "**jls** lists `jails`.", "jls lists jails."},
+		{"blank lines and indentation", "\n  one\n\n\n  two  \n", "one\ntwo"},
+		{"reasoning block", "<think>hmm</think>\nIt lists jails.", "It lists jails."},
+		{"escape sequences", "safe\x1b[2J\x1b[31mtext", "safe[2J[31mtext"},
+		{"carriage return and bidi", "a\rb\u202ec", "abc"},
+		{"tabs", "a\tb", "a b"},
+		{"empty", "  \n ", ""},
+	}
+	for _, tt := range tests {
+		if got := cleanExplanation(tt.in); got != tt.want {
+			t.Errorf("%s: cleanExplanation(%q) = %q, want %q", tt.name, tt.in, got, tt.want)
+		}
+	}
+
+	long := strings.Repeat("line\n", 3*maxExplanationLines)
+	if got := strings.Count(cleanExplanation(long), "\n") + 1; got != maxExplanationLines {
+		t.Errorf("a long explanation was cut to %d lines, want %d", got, maxExplanationLines)
+	}
+	for _, r := range cleanExplanation("x\x1b]0;title\x07y\x00z") {
+		if r < ' ' && r != '\n' {
+			t.Errorf("control character %U survived cleaning", r)
+		}
+	}
+}
+
+func TestWrap(t *testing.T) {
+	tests := []struct {
+		in    string
+		width int
+		want  []string
+	}{
+		{"one two three", 20, []string{"one two three"}},
+		{"one two three", 7, []string{"one two", "three"}},
+		{"one two three", 3, []string{"one", "two", "three"}},
+		{"first line\nsecond", 20, []string{"first line", "second"}},
+		{"supercalifragilistic word", 5, []string{"supercalifragilistic", "word"}},
+		{"ação não é ASCII", 8, []string{"ação não", "é ASCII"}},
+	}
+	for _, tt := range tests {
+		got := wrap(tt.in, tt.width)
+		if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+			t.Errorf("wrap(%q, %d) = %q, want %q", tt.in, tt.width, got, tt.want)
+		}
+	}
+}
+
 func TestMascotGeometry(t *testing.T) {
 	for name, m := range map[string]mascot{"blocks": beastieBlocks, "ascii": beastieASCII} {
 		if len(m.rows) != len(m.colors) {
 			t.Fatalf("%s: %d rows but %d color rows", name, len(m.rows), len(m.colors))
 		}
-		if m.infoRow+3 > len(m.rows) {
-			t.Errorf("%s: no room for three lines of text from row %d", name, m.infoRow)
+		if m.infoRow+4 > len(m.rows) {
+			t.Errorf("%s: no room for four lines of text from row %d", name, m.infoRow)
 		}
 		for i, row := range m.rows {
 			if n := utf8.RuneCountInString(row); n != len(m.colors[i]) {

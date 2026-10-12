@@ -1,0 +1,76 @@
+# BeastiePilot configuration
+#
+# Copy this file to one of:
+#   ~/.config/beastiepilot/config        (your user only)
+#   /usr/local/etc/beastiepilot.conf     (everyone on the machine)
+#
+# Format: KEY=value, one per line, in the style of rc.conf, with keys in
+# uppercase and values in lowercase. Values may be quoted. Lines starting with
+# "#" are comments. Every setting can also be given as a BEASTIEPILOT_<KEY>
+# environment variable or a command-line flag, which take precedence over this
+# file.
+#
+# The values shown are the defaults.
+
+# Ollama model that writes the suggestions.
+#MODEL=llama3.2
+
+# Ollama model that embeds text for the index of reference material (see
+# SOURCE_PATH below). Changing it means building the index again.
+#EMBED_MODEL=nomic-embed-text
+
+# URL of Ollama's generate API.
+#ENDPOINT=http://localhost:11434/api/generate
+
+# How long to wait for the model before giving up (for example 90s or 5m).
+#TIMEOUT=2m
+
+# What to do with a suggestion:
+#   guided  show the command, explain what each part does and why, then ask
+#   safe    show the command, then ask
+#TYPE=safe
+
+# Commands that safe mode runs WITHOUT asking, separated by commas. Empty by
+# default: every command asks. An entry is a command name, optionally followed
+# by its first arguments, and "*" stands for any one argument. For example:
+#
+#   AUTO_RUN=df, du, uptime, freebsd-version, zfs list, zpool status, pkg info, service * status, jls, sockstat
+#
+# A suggestion runs unasked only if every command in it is listed, so
+# "df -h | sort" needs both df and sort. Whatever follows the listed words is
+# not checked: "zfs list" allows any "zfs list ..." but never "zfs destroy".
+# List only commands that cannot change anything whatever arguments they are
+# given, because the model chooses those arguments.
+#AUTO_RUN=
+
+# How third-party software should be installed:
+#   pkg    binary packages (pkg install nginx)
+#   ports  build from the ports tree (make -C /usr/ports/www/nginx install clean)
+#PACKAGE_MANAGER=pkg
+
+# Where reference material lives. "beastiepilot -index" reads these places
+# into an index, and from then on the passages closest to each request are
+# shown to the model along with it. Run it again after changing them. Paths
+# must be absolute ("~" is your home directory); leave a value empty for none.
+#
+# The FreeBSD source tree, as installed by the "src" component. Only its
+# manual pages for commands, devices, file formats and administration are
+# indexed, not the code.
+#SOURCE_PATH=/usr/src
+
+# The system documentation.
+#DOCS_SOURCE=/usr/share/doc
+
+# A directory of your own notes and books: text, Markdown, HTML, manual pages,
+# EPUB, and PDF if pdftotext is installed.
+#RAG_SOURCE=
+
+# The Beastie banner drawn at startup:
+#   full     animated pixel art, when the terminal is large enough
+#   compact  a four-line mascot
+#   off      no banner
+#BANNER=full
+
+# Show which configuration, endpoint and model produced the suggestion, how
+# long it took, and the model's raw reply when it had to be cleaned up.
+#VERBOSE=false
