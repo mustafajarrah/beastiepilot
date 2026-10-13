@@ -1,10 +1,48 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestWaitStatus(t *testing.T) {
+	tests := []struct {
+		tick   int
+		waited time.Duration
+		want   string
+	}{
+		{0, 0, "Asking llama3.2 ."},
+		{3, 400 * time.Millisecond, "Asking llama3.2 .."},
+		{6, 4999 * time.Millisecond, "Asking llama3.2 ..."},
+		{9, 5 * time.Second, "Asking llama3.2 .   5s"},
+		{12, 59900 * time.Millisecond, "Asking llama3.2 ..  59s"},
+		{15, 72 * time.Second, "Asking llama3.2 ... 1m12s"},
+	}
+	for _, tt := range tests {
+		if got := waitStatus("Asking llama3.2", tt.tick, tt.waited); got != tt.want {
+			t.Errorf("waitStatus(tick %d, %s) = %q, want %q", tt.tick, tt.waited, got, tt.want)
+		}
+	}
+}
+
+// Without the sprite, only the status line is drawn, and nothing above it is
+// touched.
+func TestStatusLineAlone(t *testing.T) {
+	var out bytes.Buffer
+	a := startAnimation(styler{out: &out}, "Asking llama3.2", false)
+	time.Sleep(4 * frameInterval)
+	a.stop()
+	drawn := out.String()
+	if !strings.HasPrefix(drawn, bannerIndent+"Asking llama3.2 .") || !strings.Contains(drawn, "\r\033[K"+bannerIndent+"Asking llama3.2 ..") {
+		t.Errorf("the status line was drawn as %q", drawn)
+	}
+	if strings.Contains(drawn, "\0337") {
+		t.Errorf("something above the status line was redrawn: %q", drawn)
+	}
+}
 
 func TestSpriteGeometry(t *testing.T) {
 	if len(beastieSprite)%2 != 0 {

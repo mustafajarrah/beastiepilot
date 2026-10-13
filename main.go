@@ -421,11 +421,42 @@ func (p *pilot) answer(intent string) int {
 		p.remember(intent, command, "it could not be run")
 		return exitError
 	}
-	p.remember(intent, command, fmt.Sprintf("it ran and exited with status %d", code))
+	outcome, status := fmt.Sprintf("it ran and exited with status %d", code), fmt.Sprintf("Exit status %d", code)
+	if name := foundNothing(command, code); name != "" {
+		// Said to the model as well, so that the next request can build on it.
+		outcome += ", as " + name + " does when nothing matches"
+		status += ": " + name + " ends that way when nothing matches."
+	}
+	p.remember(intent, command, outcome)
 	if p.inSession && code != exitOK {
-		fmt.Fprintf(ui.out, "\n  %s\n", ui.paint(dim, fmt.Sprintf("Exit status %d", code)))
+		fmt.Fprintf(ui.out, "\n  %s\n", ui.paint(dim, status))
 	}
 	return code
+}
+
+// searchers are the commands that end with status 1, usually having printed
+// nothing, when what they looked for is not there: an answer more than a
+// failure, and one that the status alone does not get across.
+var searchers = [][]string{{"grep"}, {"egrep"}, {"fgrep"}, {"pgrep"}, {"which"}, {"pkg", "search"}}
+
+// foundNothing returns the name of the command if it is one of the searchers
+// and status is the one they report no match with, and "" otherwise. Only a
+// command on its own counts: with several on the line, the status may be
+// another's.
+func foundNothing(command string, status int) string {
+	if status != 1 {
+		return ""
+	}
+	commands, err := splitCommands(command)
+	if err != nil || len(commands) != 1 {
+		return ""
+	}
+	for _, name := range searchers {
+		if listed(commands[0], [][]string{name}) {
+			return strings.Join(name, " ")
+		}
+	}
+	return ""
 }
 
 // ask sends one request to the model and returns its raw reply and how long
@@ -440,9 +471,9 @@ func ask(ui styler, cfg settings, animate bool, status, system, prompt string) (
 }
 
 // waiting runs request, which talks to Ollama, and returns how long it took.
-// Meanwhile it shows status on the terminal, animating the banner printed
-// just above when animate is set. request is cancelled by Ctrl-C and after
-// TIMEOUT.
+// Meanwhile it shows status on the terminal, with how long the wait has been
+// once it is a long one, animating the banner printed just above when animate
+// is set. request is cancelled by Ctrl-C and after TIMEOUT.
 func waiting(ui styler, cfg settings, animate bool, status string, request func(context.Context) error) (time.Duration, error) {
 	// Let Ctrl-C abort a slow model instead of leaving the user waiting. The
 	// handler is removed on return, so Ctrl-C works normally at the prompt.
@@ -453,11 +484,7 @@ func waiting(ui styler, cfg settings, animate bool, status string, request func(
 
 	if ui.tty {
 		defer fmt.Fprint(ui.out, "\r\033[K") // erase the status line, after the animation has stopped
-		if animate {
-			defer startAnimation(ui, status).stop()
-		} else {
-			fmt.Fprint(ui.out, ui.paint(dim, bannerIndent+status+" ..."))
-		}
+		defer startAnimation(ui, status, animate).stop()
 	}
 
 	start := time.Now()
@@ -487,7 +514,8 @@ func (p *pilot) fail(format string, args ...any) {
 func (p *pilot) queryFailure(err error) int {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		p.fail("no answer from %s within %s (raise TIMEOUT or pass -timeout)", p.cfg.Model, p.cfg.Timeout)
+		p.fail("no answer from %s within %s.%s To wait longer, set TIMEOUT in the configuration or start with -timeout, as in: beastiepilot -timeout 10m",
+			p.cfg.Model, p.cfg.Timeout, whySlow(p.cfg))
 		return exitError
 	case errors.Is(err, context.Canceled):
 		p.fail("interrupted")
@@ -496,6 +524,25 @@ func (p *pilot) queryFailure(err error) int {
 		p.fail("%v", err)
 		return exitError
 	}
+}
+
+// whySlow says what Ollama reports about the model that did not answer in
+// time, as a sentence to follow the complaint, or "" when Ollama says nothing
+// that bears on it. It asks now, after the wait: a request given up on while
+// the model was still being loaded leaves no model behind.
+func whySlow(cfg settings) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	loaded, cpuOnly, err := modelLoaded(ctx, cfg.Endpoint, cfg.Model)
+	switch {
+	case err != nil:
+		return ""
+	case !loaded:
+		return " Ollama does not have the model loaded: loading it may take longer than that here, or Ollama may be busy with other work, such as indexing."
+	case cpuOnly:
+		return " Ollama has the model loaded now and runs it on the CPU alone, without a GPU, so answers take a while and the first one the longest: asking again may be enough."
+	}
+	return " Ollama has the model loaded now: asking again may be enough."
 }
 
 // mistypedConfigure reports whether intent is a single word that is not

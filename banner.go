@@ -377,24 +377,43 @@ func printBanner(ui styler, cfg settings) bannerArt {
 	return art
 }
 
-// animator replays the sprite above the cursor, and a status line at the
-// cursor, while the model is thinking.
+// clockAfter is how long a wait lasts before the status line starts to say
+// how long it has been. A quick answer needs no clock.
+const clockAfter = 5 * time.Second
+
+// waitStatus is the line shown while Ollama is working: what it is doing,
+// dots that move so that the wait is seen to be alive and, once it has lasted
+// a while, for how long.
+func waitStatus(status string, tick int, waited time.Duration) string {
+	s := status + " " + strings.Repeat(".", 1+(tick/3)%3)
+	if waited < clockAfter {
+		return s
+	}
+	// The clock keeps its column while the dots come and go.
+	return fmt.Sprintf("%-*s %s", len(status)+4, s, waited.Truncate(time.Second))
+}
+
+// animator keeps a status line at the cursor up to date while the model is
+// thinking and, with sprite set, replays the sprite above it.
 type animator struct {
 	out    io.Writer
+	sprite bool
 	status func(tick int) string
 	stopCh chan struct{}
 	done   chan struct{}
 }
 
-// startAnimation begins animating the banner that was just printed. The
-// cursor must still be on the line directly below the banner's trailing blank
-// line; the status line is drawn there. Call stop before printing anything
-// else.
-func startAnimation(ui styler, status string) *animator {
+// startAnimation draws the status line at the cursor and keeps it moving.
+// With sprite set it also animates the banner that was just printed; the
+// cursor must then still be on the line directly below the banner's trailing
+// blank line. Call stop before printing anything else.
+func startAnimation(ui styler, status string, sprite bool) *animator {
+	start := time.Now()
 	a := &animator{
-		out: ui.out,
+		out:    ui.out,
+		sprite: sprite,
 		status: func(tick int) string {
-			return ui.paint(dim, bannerIndent+status+" "+strings.Repeat(".", 1+(tick/3)%3))
+			return ui.paint(dim, bannerIndent+waitStatus(status, tick, time.Since(start)))
 		},
 		stopCh: make(chan struct{}),
 		done:   make(chan struct{}),
@@ -407,25 +426,35 @@ func startAnimation(ui styler, status string) *animator {
 func (a *animator) run() {
 	defer close(a.done)
 	tc := truecolor()
-	shown, status := renderSprite(spriteFrame(0), tc), a.status(0)
+	var shown []string
+	if a.sprite {
+		shown = renderSprite(spriteFrame(0), tc)
+	}
+	status := a.status(0)
 
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 	for tick := 1; ; tick++ {
 		select {
 		case <-a.stopCh:
-			// Leave Beastie at rest.
-			io.WriteString(a.out, redraw(shown, renderSprite(spriteFrame(0), tc)))
+			if a.sprite {
+				// Leave Beastie at rest.
+				io.WriteString(a.out, redraw(shown, renderSprite(spriteFrame(0), tc)))
+			}
 			return
 		case <-ticker.C:
-			next := renderSprite(spriteFrame(tick), tc)
-			out := redraw(shown, next)
+			out := ""
+			if a.sprite {
+				next := renderSprite(spriteFrame(tick), tc)
+				out, shown = redraw(shown, next), next
+			}
 			if s := a.status(tick); s != status {
 				out += "\r\033[K" + s
 				status = s
 			}
-			shown = next
-			io.WriteString(a.out, out) // one write per frame, to avoid tearing
+			if out != "" {
+				io.WriteString(a.out, out) // one write per frame, to avoid tearing
+			}
 		}
 	}
 }

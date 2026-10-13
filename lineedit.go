@@ -49,14 +49,21 @@ type lineEditor struct {
 	pending []byte // read from the terminal and not looked at yet
 }
 
-// width returns the number of columns to draw in.
-func (e *lineEditor) width() int {
-	if e.columns != nil {
-		if n := e.columns(); n >= 20 {
+// usableColumns returns the number of columns to draw in on a terminal whose
+// width columns reports: defaultColumns if it does not say, or names a width
+// too small to be one.
+func usableColumns(columns func() int) int {
+	if columns != nil {
+		if n := columns(); n >= 20 {
 			return n
 		}
 	}
 	return defaultColumns
+}
+
+// width returns the number of columns to draw in.
+func (e *lineEditor) width() int {
+	return usableColumns(e.columns)
 }
 
 // rule returns the line drawn above and below the text.

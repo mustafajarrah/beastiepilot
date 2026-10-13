@@ -207,6 +207,13 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
+// indexProgress says how far the indexing has come with done of total files
+// behind it. The percentage counts files, the one thing known beforehand; they
+// differ in size, so it stands still on a long one.
+func indexProgress(done, total int) string {
+	return fmt.Sprintf("Reading and embedding: %d%% (file %d of %d)", done*100/max(total, 1), done+1, total)
+}
+
 // runIndex is the -index command: it builds or updates the index from the
 // configured sources and returns the exit code. approve, if not nil, is asked
 // once the files to read are known, unless the index already holds them all;
@@ -266,7 +273,7 @@ func runIndex(ui styler, cfg settings, approve func() bool) int {
 	var progress func(done, total int)
 	if ui.tty {
 		progress = func(done, total int) {
-			fmt.Fprintf(ui.out, "\r\033[K    %s", ui.paint(dim, fmt.Sprintf("Reading and embedding: file %d of %d", done+1, total)))
+			fmt.Fprintf(ui.out, "\r\033[K    %s", ui.paint(dim, indexProgress(done, total)))
 		}
 	}
 	report, err := buildIndex(ctx, path, cfg.EmbedModel, files, embedder, progress)

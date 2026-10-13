@@ -290,21 +290,46 @@ back for the next one.
   abandons a request the model has not answered, means no at the question, and
   interrupts a command that is running. On an empty line, pressing it twice
   leaves.
+- **Waiting.** While the model works, a line says so and, after five
+  seconds, for how long. If no answer comes within `TIMEOUT`, the session says
+  what Ollama reports about the model: whether it is loaded, and whether it
+  runs on the CPU alone, where a first answer can take minutes. Asking again
+  is often enough then, the model being loaded by now; `beastiepilot -timeout
+  10m` waits longer.
+- **A command that fails** leaves its exit status on screen. For a search that
+  found nothing (`grep`, `pgrep`, `which`, `pkg search`) the session adds that
+  this is what the status means, and the next request is told so as well.
 - **Leaving.** Ctrl-D on an empty line, `/exit`, `exit` or `quit`.
 
 | Command   | What it does                                            |
 | --------- | ------------------------------------------------------- |
-| `/guided` | Explain each command before asking, from now on         |
-| `/safe`   | Show each command and ask, without the explanation      |
+| `/type`   | Choose what is done with each command, from now on      |
 | `/clear`  | Clear the screen and forget the earlier requests        |
 | `/help`   | List these commands                                     |
 | `/exit`   | Leave                                                   |
 
-A command is a single word that starts with a slash, so a request such as
-`/var is full, what takes the space?` is still a request. Flags apply to the
-whole session: `beastiepilot -type guided -model qwen2.5-coder`. The session
-needs a terminal; on one that cannot be read key by key (`TERM=dumb`) it falls
-back to a plain prompt without the box and the arrow keys.
+`/type` opens a menu of the [modes](#modes), with the one in effect marked:
+
+```console
+  > Type  what is done with each command
+
+    > 1. safe    show each command, then ask  (current)
+      2. guided  explain each command first, then ask
+
+    Up and Down to choose · Enter to confirm · Esc to cancel
+```
+
+Up and Down move, Enter confirms, a digit picks that entry at once, and Esc or
+Ctrl-C leaves things as they are. `/type guided` and `/type safe` choose
+without the menu. The choice holds until the session ends; `TYPE` in the
+configuration sets what every session starts with.
+
+A command is a single word that starts with a slash, and only `/type` takes a
+word after it, so a request such as `/var is full, what takes the space?` is
+still a request. Flags apply to the whole session: `beastiepilot -type guided
+-model qwen2.5-coder`. The session needs a terminal; on one that cannot be
+read key by key (`TERM=dumb`) it falls back to a plain prompt without the box
+and the arrow keys, and to a numbered list for the menu.
 
 ### Examples
 
@@ -562,6 +587,21 @@ $ beastiepilot -index
 ```
 
 (The numbers are an illustration, not a measurement.)
+
+While it works, one line says how far it is, as in `Reading and embedding: 41%
+(file 1203 of 2914)`. The percentage counts files, which differ in size, so it
+stands still on a long one.
+
+**Checking it.** A run that went well ends with `Index ready:` and the number
+of excerpts and files. One that did not ends with the reason, after `Stopped
+early` and what was saved, if anything was. Later on:
+
+- `beastiepilot -index` again answers `Index already up to date:` with the
+  same numbers, without embedding anything.
+- `beastiepilot -verbose show the free disk space` lists, as `reference`
+  lines, the excerpts that went to the model with that request and how close
+  each one was.
+- `beastiepilot configure` ends by saying how many excerpts are at hand.
 
 **What is indexed.** Three settings name the places to read:
 

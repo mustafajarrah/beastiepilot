@@ -76,13 +76,43 @@ var errNoRawInput = errors.New("the terminal cannot be read key by key")
 // edit reads a line with ed, with the terminal handing over each key as it is
 // pressed. With fresh set, only what is typed from now on counts. It returns
 // errNoRawInput when the terminal cannot be read that way.
-func (p *pilot) edit(ed *lineEditor, fresh bool) (string, error) {
+func (p *pilot) edit(ed *lineEditor, fresh bool) (line string, err error) {
+	err = p.keyed(fresh, func() (err error) {
+		line, err = ed.read()
+		return err
+	})
+	return line, err
+}
+
+// pick offers choices in a menu and returns the number of the one chosen, or
+// -1 if the user chose none. current is the one in effect.
+func (p *pilot) pick(title, about string, choices []choice, current int) int {
+	m := &menu{ui: p.ui, in: p.tty, columns: p.columns, title: title, about: about, choices: choices, current: current}
+	chosen := -1
+	err := p.keyed(true, func() (err error) {
+		chosen, err = m.read()
+		return err
+	})
+	switch {
+	case err == nil:
+		return chosen
+	case errors.Is(err, errNoRawInput) && p.in != nil:
+		return m.ask(p.in)
+	}
+	return -1
+}
+
+// keyed runs read while the terminal hands over each key as it is pressed.
+// With fresh set, only what is typed from now on counts. It returns
+// errNoRawInput, without running read, when the terminal cannot be read that
+// way.
+func (p *pilot) keyed(fresh bool, read func() error) error {
 	if p.tty == nil || os.Getenv("TERM") == "dumb" {
-		return "", errNoRawInput
+		return errNoRawInput
 	}
 	restore, err := rawInput(p.tty, fresh)
 	if err != nil {
-		return "", errNoRawInput
+		return errNoRawInput
 	}
 	defer restore()
 
@@ -105,7 +135,7 @@ func (p *pilot) edit(ed *lineEditor, fresh bool) (string, error) {
 		case <-done:
 		}
 	}()
-	return ed.read()
+	return read()
 }
 
 // confirm asks whether to run the suggested command. An answer typed before
@@ -150,13 +180,63 @@ func separator() string {
 }
 
 // sessionCommand reports whether line is a command for the session rather
-// than a request, and returns its name. Commands are a single word that
-// starts with a slash, which no request is.
-func sessionCommand(line string) (name string, ok bool) {
-	if !strings.HasPrefix(line, "/") || strings.ContainsAny(line, " \t") {
-		return "", false
+// than a request, and returns its name and what follows it. A command is a
+// single word that starts with a slash, which no request is; only /type takes
+// a word after it. Any other line is a request, even one that starts with a
+// slash, as "/var is full, what takes the space?" does.
+func sessionCommand(line string) (name, arg string, ok bool) {
+	words := strings.Fields(line)
+	if len(words) == 0 || !strings.HasPrefix(words[0], "/") {
+		return "", "", false
 	}
-	return strings.ToLower(line[1:]), true
+	name = strings.ToLower(words[0][1:])
+	switch {
+	case len(words) == 1:
+		return name, "", true
+	case len(words) == 2 && name == "type":
+		return name, words[1], true
+	}
+	return "", "", false
+}
+
+// types are the choices of /type, in the order it offers them.
+var types = []choice{
+	{typeSafe, "show each command, then ask"},
+	{typeGuided, "explain each command first, then ask"},
+}
+
+// chooseType changes what is done with a suggestion, for the rest of the
+// session: to the type named, or with no name to one picked from a menu.
+func (p *pilot) chooseType(name string) {
+	current := 0
+	for i, c := range types {
+		if c.name == p.cfg.Type {
+			current = i
+		}
+	}
+	chosen := -1
+	if name == "" {
+		if chosen = p.pick("Type", "what is done with each command", types, current); chosen < 0 {
+			p.say("Kept " + p.cfg.Type + " mode.")
+			return
+		}
+	} else {
+		for i, c := range types {
+			if strings.EqualFold(c.name, name) {
+				chosen = i
+			}
+		}
+		if chosen < 0 {
+			p.say(fmt.Sprintf("There is no type %q: the types are %s and %s. /type alone lets you pick one.", name, typeSafe, typeGuided))
+			return
+		}
+	}
+	switch p.cfg.Type = types[chosen].name; p.cfg.Type {
+	case typeGuided:
+		p.say("Guided mode: each command comes with an explanation.")
+	default:
+		p.say("Safe mode: each command is shown and asked about, without an explanation.")
+	}
 }
 
 // session is the interactive session. It returns the exit code.
@@ -205,12 +285,12 @@ func (p *pilot) session() int {
 			fmt.Fprintln(ui.out, mark+ui.paint(bold, line))
 		}
 
-		name, isCommand := sessionCommand(line)
+		name, arg, isCommand := sessionCommand(line)
 		switch {
 		case line == "exit" || line == "quit" || name == "exit" || name == "quit":
 			return exitOK
 		case isCommand:
-			p.command(name)
+			p.command(name, arg)
 		case line == "configure" || mistypedConfigure(line):
 			p.say("The setup is not run from here. Leave with /exit and run: beastiepilot configure")
 		default:
@@ -234,15 +314,15 @@ func (p *pilot) greet() {
 	}
 }
 
-// command carries out a command of the session.
-func (p *pilot) command(name string) {
+// command carries out a command of the session. arg is the word that came
+// after it, if one did.
+func (p *pilot) command(name, arg string) {
 	ui := p.ui
 	switch name {
 	case "help":
 		fmt.Fprintf(ui.out, "\n  %s %s\n\n", ui.paint(boldCyan, ">"), ui.paint(bold, "Session commands"))
 		for _, c := range [][2]string{
-			{"/guided", "explain each command before asking"},
-			{"/safe", "show each command and ask, without the explanation"},
+			{"/type", "choose what is done with each command: safe or guided"},
 			{"/clear", "clear the screen and forget the earlier requests"},
 			{"/help", "this list"},
 			{"/exit", "leave; so do exit, quit and Ctrl-D"},
@@ -251,12 +331,8 @@ func (p *pilot) command(name string) {
 		}
 		p.say("Up and Down bring back earlier requests. Ctrl-C clears the line, stops a request that is waiting for the model and stops a command that is running.")
 		p.say(fmt.Sprintf("The last %d requests go to the model along with each new one, so a request can build on the one before: \"the same for /var\".", maxPast))
-	case "guided":
-		p.cfg.Type = typeGuided
-		p.say("Guided mode: each command comes with an explanation.")
-	case "safe":
-		p.cfg.Type = typeSafe
-		p.say("Safe mode: each command is shown and asked about, without an explanation.")
+	case "type":
+		p.chooseType(arg)
 	case "clear":
 		p.past = nil
 		fmt.Fprint(ui.out, "\033[H\033[2J")

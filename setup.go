@@ -1051,6 +1051,57 @@ func hasModel(ctx context.Context, endpoint, name string) (bool, error) {
 	return false, apiError(resp, raw)
 }
 
+// withTag returns a model name with the tag Ollama assumes when none is given.
+func withTag(name string) string {
+	if strings.Contains(name[strings.LastIndexByte(name, '/')+1:], ":") {
+		return name
+	}
+	return name + ":latest"
+}
+
+// modelLoaded asks the Ollama behind endpoint whether it has the model name
+// in memory at the moment and, if so, whether it runs it without any help
+// from a GPU.
+func modelLoaded(ctx context.Context, endpoint, name string) (loaded, cpuOnly bool, err error) {
+	target, err := apiURL(endpoint, "ps")
+	if err != nil {
+		return false, false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return false, false, fmt.Errorf("invalid endpoint %q: %w", target, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, false, fmt.Errorf("cannot reach Ollama at %s: %w", target, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return false, false, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, false, apiError(resp, raw)
+	}
+	var reply struct {
+		Models []struct {
+			Name     string `json:"name"`
+			Model    string `json:"model"`
+			SizeVRAM int64  `json:"size_vram"` // how much of it is in a GPU's memory
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return false, false, errors.New("the answer is not Ollama's")
+	}
+	want := strings.ToLower(withTag(name))
+	for _, m := range reply.Models {
+		if strings.ToLower(withTag(m.Name)) == want || strings.ToLower(withTag(m.Model)) == want {
+			return true, m.SizeVRAM == 0, nil
+		}
+	}
+	return false, false, nil
+}
+
 // pullStatus is one line of the progress Ollama reports while downloading.
 type pullStatus struct {
 	Status    string `json:"status"`

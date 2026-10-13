@@ -125,6 +125,23 @@ func TestIndexBuildAndSearch(t *testing.T) {
 	}
 }
 
+func TestIndexProgress(t *testing.T) {
+	tests := []struct {
+		done, total int
+		want        string
+	}{
+		{0, 2909, "Reading and embedding: 0% (file 1 of 2909)"},
+		{1454, 2909, "Reading and embedding: 49% (file 1455 of 2909)"},
+		{2908, 2909, "Reading and embedding: 99% (file 2909 of 2909)"},
+		{0, 1, "Reading and embedding: 0% (file 1 of 1)"},
+	}
+	for _, tt := range tests {
+		if got := indexProgress(tt.done, tt.total); got != tt.want {
+			t.Errorf("indexProgress(%d, %d) = %q, want %q", tt.done, tt.total, got, tt.want)
+		}
+	}
+}
+
 func TestIndexUpdate(t *testing.T) {
 	root := tree(t, library)
 	path := filepath.Join(t.TempDir(), "index")

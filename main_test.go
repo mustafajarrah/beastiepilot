@@ -65,6 +65,89 @@ func TestMistypedConfigure(t *testing.T) {
 	}
 }
 
+func TestFoundNothing(t *testing.T) {
+	tests := []struct {
+		command string
+		status  int
+		want    string
+	}{
+		{"pkg search hyperland", 1, "pkg search"},
+		{"pkg search -o hyprland", 1, "pkg search"},
+		{"grep -r beastie /etc", 1, "grep"},
+		{"pgrep sshd", 1, "pgrep"},
+		{"which hx", 1, "which"},
+		{"pkg search hyperland", 0, ""},
+		{"pkg search hyperland", 70, ""}, // another status is a failure
+		{"grep -r beastie /etc", 2, ""},
+		{"pkg install hyprland", 1, ""},
+		{"pkg info hyprland", 1, ""},
+		{"ls /nonexistent", 1, ""},
+		{"ps aux | grep sshd", 1, ""},                // whose status it is cannot be told
+		{"pkg update && pkg search hyprland", 1, ""}, // nor here
+		{"grep $(cat words) file", 1, ""},
+		{"", 1, ""},
+	}
+	for _, tt := range tests {
+		if got := foundNothing(tt.command, tt.status); got != tt.want {
+			t.Errorf("foundNothing(%q, %d) = %q, want %q", tt.command, tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestWithTag(t *testing.T) {
+	for name, want := range map[string]string{
+		"llama3.2":                "llama3.2:latest",
+		"llama3.2:1b":             "llama3.2:1b",
+		"me/model":                "me/model:latest",
+		"localhost:5000/me/model": "localhost:5000/me/model:latest",
+		"localhost:5000/me/m:q4":  "localhost:5000/me/m:q4",
+	} {
+		if got := withTag(name); got != want {
+			t.Errorf("withTag(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestWhySlow checks what is said about a model that did not answer in time,
+// from what Ollama reports about it afterwards.
+func TestWhySlow(t *testing.T) {
+	tests := []struct {
+		name, ps string
+		status   int
+		want     string
+	}{
+		{"on the CPU", `{"models":[{"name":"llama3.2:latest","model":"llama3.2:latest","size":3562954752,"size_vram":0}]}`, 200, "on the CPU alone"},
+		{"on a GPU", `{"models":[{"name":"llama3.2:latest","model":"llama3.2:latest","size":3562954752,"size_vram":3562954752}]}`, 200, "has the model loaded now: asking again"},
+		{"another model only", `{"models":[{"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","size_vram":0}]}`, 200, "does not have the model loaded"},
+		{"nothing loaded", `{"models":[]}`, 200, "does not have the model loaded"},
+		{"an Ollama without the list", `404 page not found`, 404, ""},
+		{"not Ollama", `<html>`, 200, ""},
+	}
+	for _, tt := range tests {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/api/ps" {
+				t.Errorf("%s: asked %s %s, want GET /api/ps", tt.name, r.Method, r.URL.Path)
+			}
+			w.WriteHeader(tt.status)
+			io.WriteString(w, tt.ps)
+		}))
+		cfg := defaultSettings()
+		cfg.Endpoint = srv.URL + "/api/generate"
+		got := whySlow(cfg)
+		srv.Close()
+		if (tt.want == "") != (got == "") || !strings.Contains(got, tt.want) {
+			t.Errorf("%s: whySlow() = %q, want it to say %q", tt.name, got, tt.want)
+		}
+	}
+
+	// An Ollama that is gone says nothing either.
+	cfg := defaultSettings()
+	cfg.Endpoint = "http://127.0.0.1:1/api/generate"
+	if got := whySlow(cfg); got != "" {
+		t.Errorf("with no Ollama, whySlow() = %q, want nothing", got)
+	}
+}
+
 func TestEditDistance(t *testing.T) {
 	tests := []struct {
 		a, b string
