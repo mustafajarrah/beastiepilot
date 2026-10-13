@@ -12,62 +12,7 @@ import (
 
 // The interactive session: "beastiepilot" with no request takes requests one
 // after another on the terminal, each handled as it would be from the command
-// line, until the user leaves. What was asked before goes along with each new
-// request, so that it can build on the last.
-
-const (
-	// maxPast is how many earlier requests accompany a new one, and
-	// maxPastChars how much of each is kept. Together they bound what the
-	// session adds to the prompt, which has contextTokens to fit in.
-	maxPast      = 5
-	maxPastChars = 300
-)
-
-// exchange is a request made earlier in the session and what came of it.
-type exchange struct {
-	request string
-	command string // what the model suggested, or "" if it gave none
-	outcome string
-}
-
-// remember keeps a request for the ones that follow it in the session.
-func (p *pilot) remember(request, command, outcome string) {
-	p.past = append(p.past, exchange{request, command, outcome})
-	if len(p.past) > maxPast {
-		p.past = p.past[len(p.past)-maxPast:]
-	}
-}
-
-// clip puts s on one line and cuts it to maxPastChars.
-func clip(s string) string {
-	r := []rune(strings.Join(strings.Fields(s), " "))
-	if len(r) > maxPastChars {
-		return string(r[:maxPastChars]) + " ..."
-	}
-	return string(r)
-}
-
-// sessionSection formats the earlier requests of a session as a section of
-// the system prompt. Like the rest of the prompt it steers the model and
-// guards nothing: whatever comes back is reviewed as any other suggestion.
-func sessionSection(past []exchange) string {
-	if len(past) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("\n\nEARLIER IN THIS SESSION (the user's previous requests, oldest first, and what you answered):\n" +
-		"- Use them only to understand what the new request refers to, such as \"it\", \"the same\", \"that one\" or \"again\".\n" +
-		"- Answer the new request only. Do not repeat an earlier command unless the user asks for it again.\n" +
-		"- The OUTPUT FORMAT rules above still apply: reply with the command only.\n")
-	for i, x := range past {
-		fmt.Fprintf(&b, "\n[%d] Request: %s\n", i+1, clip(x.request))
-		if x.command != "" {
-			fmt.Fprintf(&b, "    Command: %s\n", clip(x.command))
-		}
-		fmt.Fprintf(&b, "    Outcome: %s\n", x.outcome)
-	}
-	return b.String()
-}
+// line, until the user leaves.
 
 // errNoRawInput says that the terminal cannot be read key by key, so the
 // plain way of reading a line has to do.
@@ -323,23 +268,29 @@ func (p *pilot) command(name, arg string) {
 		fmt.Fprintf(ui.out, "\n  %s %s\n\n", ui.paint(boldCyan, ">"), ui.paint(bold, "Session commands"))
 		for _, c := range [][2]string{
 			{"/type", "choose what is done with each command: safe or guided"},
-			{"/clear", "clear the screen and forget the earlier requests"},
+			{"/clear", "clear the screen and forget the earlier requests, for good"},
 			{"/help", "this list"},
 			{"/exit", "leave; so do exit, quit and Ctrl-D"},
 		} {
 			fmt.Fprintf(ui.out, "    %-9s %s\n", c[0], ui.paint(dim, c[1]))
 		}
 		p.say("Up and Down bring back earlier requests. Ctrl-C clears the line, stops a request that is waiting for the model and stops a command that is running.")
-		p.say(fmt.Sprintf("The last %d requests go to the model along with each new one, so a request can build on the one before: \"the same for /var\".", maxPast))
+		p.say(historyHelp(p.cfg))
 	case "type":
 		p.chooseType(arg)
 	case "clear":
-		p.past = nil
 		fmt.Fprint(ui.out, "\033[H\033[2J")
 		if p.cfg.Banner != bannerOff {
 			printBanner(ui, p.cfg)
 		}
 		p.greet()
+		had := len(p.past) > 0
+		switch err := p.forget(); {
+		case err != nil:
+			p.caution(fmt.Sprintf("The earlier requests are still in the history file: %v", err))
+		case had:
+			p.say("The earlier requests are forgotten.")
+		}
 	default:
 		p.say("There is no /" + name + " here. /help lists the commands.")
 	}

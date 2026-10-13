@@ -207,7 +207,7 @@ func TestRunsAsRoot(t *testing.T) {
 	if got, want := noted(log), "su root -c /bin/sh -c 'eval \"$BEASTIEPILOT_COMMAND\"'\npkg install -y two words\n"; got != want {
 		t.Errorf("this ran:\n%s\nwant:\n%s", got, want)
 	}
-	if want := "it ran as root and exited with status 3"; len(p.past) != 2 || p.past[0].outcome != want {
+	if want := "it ran as root and exited with status 3"; len(p.past) != 2 || p.past[0].Outcome != want {
 		t.Errorf("the session remembers %+v, want the first to end with %q", p.past, want)
 	}
 
@@ -293,8 +293,8 @@ func TestCommandInComment(t *testing.T) {
 	if got, want := string(raw), "pkg info -a\n"; got != want {
 		t.Errorf("this ran:\n%s\nwant:\n%s", got, want)
 	}
-	if len(p.past) != 2 || p.past[0].command != "pkg info -a" || p.past[0].outcome != "it ran and exited with status 3" ||
-		p.past[1].command != "" || p.past[1].outcome != "you gave no command: pkg has no package of that name" {
+	if len(p.past) != 2 || p.past[0].Command != "pkg info -a" || p.past[0].Outcome != "it ran and exited with status 3" ||
+		p.past[1].Command != "" || p.past[1].Outcome != "you gave no command: pkg has no package of that name" {
 		t.Errorf("the session remembers %+v", p.past)
 	}
 	// The model is told of the command it gave, not of a refusal.

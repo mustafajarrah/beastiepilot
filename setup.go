@@ -864,6 +864,13 @@ func (s *setup) summary() int {
 // XDG_STATE_HOME, because it describes this machine and is not a setting. It
 // is "" if that directory is unknown.
 func configuredPath() string {
+	return statePath("configured")
+}
+
+// statePath returns where the file called name is kept under the user's
+// state directory, honoring XDG_STATE_HOME, or "" if that directory is
+// unknown.
+func statePath(name string) string {
 	dir := os.Getenv("XDG_STATE_HOME")
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -872,7 +879,7 @@ func configuredPath() string {
 		}
 		dir = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(dir, "beastiepilot", "configured")
+	return filepath.Join(dir, "beastiepilot", name)
 }
 
 // isConfigured reports whether the setup has finished for this user.

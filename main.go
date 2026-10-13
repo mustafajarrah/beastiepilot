@@ -44,14 +44,23 @@ const (
 	// command is tiny; anything near this size is a misbehaving server.
 	maxResponseBytes = 1 << 20
 
-	// contextTokens is the context window asked of Ollama with every request.
-	// It holds the system prompt, three excerpts and the request with room to
-	// spare. Leaving it to the server would not do: some defaults are too
-	// small, and a prompt that does not fit is cut from the top, dropping the
-	// rules in systemPrompt; FreeBSD's ollama service defaults to 65536, which
-	// costs gigabytes of memory for nothing. Asking for the same size every
-	// time also keeps Ollama from reloading the model between requests.
-	contextTokens = 4096
+	// defaultContext is the context window asked of Ollama with every request
+	// unless CONTEXT says otherwise, and minContext the least CONTEXT can be:
+	// it holds the system prompt, three excerpts and the request, and what
+	// room is left goes to the earlier requests. Leaving it to the server
+	// would not do: some defaults are too small, and a prompt that does not
+	// fit is cut from the top, dropping the rules in systemPrompt; FreeBSD's
+	// ollama service defaults to 65536, which costs gigabytes of memory for
+	// nothing. Asking for the same size every time also keeps Ollama from
+	// reloading the model between requests.
+	defaultContext = 4096
+	minContext     = 4096
+	maxContext     = 131072
+
+	// defaultHistory is how many earlier requests go to the model with a new
+	// one unless HISTORY says otherwise, and maxHistory the most it can be.
+	defaultHistory = 100
+	maxHistory     = 1000
 )
 
 // Process exit codes. When a suggested command is executed, its own exit code
@@ -188,6 +197,8 @@ func run() int {
 	flag.String("embed-model", def.EmbedModel, "Ollama embedding model `name`, for the index")
 	flag.String("endpoint", def.Endpoint, "Ollama generate API `url`")
 	flag.Duration("timeout", def.Timeout, "how long to wait for the model")
+	flag.Int("context", def.Context, "context window asked of Ollama, in `tokens`")
+	flag.Int("history", def.History, "send the last `n` requests to the model along with each new one; 0 keeps none")
 	flag.String("type", def.Type, "what to do with a suggestion: `guided|safe`")
 	flag.String("auto-run", def.AutoRun, "comma-separated `commands` that safe mode runs without asking")
 	flag.String("package-manager", def.PackageManager, "install software with `pkg|ports`")
@@ -251,6 +262,7 @@ func run() int {
 	saved := cfg
 	flagKeys := map[string]string{
 		"model": "MODEL", "embed-model": "EMBED_MODEL", "endpoint": "ENDPOINT", "timeout": "TIMEOUT", "type": "TYPE",
+		"context": "CONTEXT", "history": "HISTORY",
 		"auto-run": "AUTO_RUN", "package-manager": "PACKAGE_MANAGER", "verbose": "VERBOSE",
 		"source-path": "SOURCE_PATH", "docs-source": "DOCS_SOURCE", "rag-source": "RAG_SOURCE",
 	}
@@ -292,10 +304,11 @@ func run() int {
 		return newSetup(ui, tty, cfg, saved, file, thisMachine(tty)).run()
 	}
 
-	p := &pilot{ui: ui, cfg: cfg, configFiles: configFiles, root: os.Geteuid() == 0}
+	p := &pilot{ui: ui, cfg: cfg, configFiles: configFiles, root: os.Geteuid() == 0, history: historyPath()}
 	if tty != nil {
 		p.tty, p.in = tty, tty
 	}
+	p.recall()
 	if interactive {
 		return p.session()
 	}
@@ -311,10 +324,14 @@ type pilot struct {
 	in          io.Reader // where approval is read from: the terminal, or nil
 	cfg         settings
 	configFiles []string
-	root        bool       // whoever runs this is root
-	animate     bool       // the banner is right above, to animate while waiting
-	inSession   bool       // requests come one after another, on the terminal
-	past        []exchange // the earlier requests of the session
+	root        bool // whoever runs this is root
+	animate     bool // the banner is right above, to animate while waiting
+	inSession   bool // requests come one after another, on the terminal
+
+	history       string     // the file earlier requests are kept in, or "" to keep them for this run only
+	past          []exchange // the earlier requests, oldest first: the last HISTORY of them
+	sent          int        // how many of them went along with the latest request
+	historyFailed bool       // that file cannot be used, and the user has been told
 }
 
 // answer takes one request through to the end: it asks the model for a
@@ -338,7 +355,12 @@ func (p *pilot) answer(intent string) int {
 		}
 	}
 
-	system := systemPrompt + cfg.promptPreferences() + hostContext() + sessionSection(p.past) + referenceSection(excerpts)
+	// The earlier requests get the room that the rest leaves in the context.
+	rules, reference := systemPrompt+cfg.promptPreferences()+hostContext(), referenceSection(excerpts)
+	earlier := recent(p.past, cfg.History, cfg.Context-replyTokens-tokens(rules+reference+intent))
+	kept := len(p.past)
+	p.sent = len(earlier)
+	system := rules + historySection(earlier) + reference
 	reply, elapsed, err := ask(ui, cfg, p.animate, "Asking "+cfg.Model, system, intent)
 	if err != nil {
 		return p.queryFailure(err)
@@ -346,7 +368,7 @@ func (p *pilot) answer(intent string) int {
 
 	command := cleanCommand(reply)
 	if cfg.Verbose {
-		printDetails(ui, cfg, p.configFiles, elapsed, reply, command, excerpts)
+		printDetails(ui, cfg, p.configFiles, elapsed, reply, command, excerpts, historyDetail(p.sent, kept, cfg))
 	}
 	if err := validateCommand(command); err != nil {
 		p.fail("%v", err)
@@ -491,7 +513,7 @@ func foundNothing(command string, status int) string {
 func ask(ui styler, cfg settings, animate bool, status, system, prompt string) (string, time.Duration, error) {
 	var reply string
 	elapsed, err := waiting(ui, cfg, animate, status, func(ctx context.Context) (err error) {
-		reply, err = suggest(ctx, cfg.Endpoint, cfg.Model, system, prompt)
+		reply, err = suggest(ctx, cfg.Endpoint, cfg.Model, cfg.Context, system, prompt)
 		return err
 	})
 	return reply, elapsed, err
@@ -541,8 +563,8 @@ func (p *pilot) fail(format string, args ...any) {
 func (p *pilot) queryFailure(err error) int {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		p.fail("no answer from %s within %s.%s To wait longer, set TIMEOUT in the configuration or start with -timeout, as in: beastiepilot -timeout 10m",
-			p.cfg.Model, p.cfg.Timeout, whySlow(p.cfg))
+		p.fail("no answer from %s within %s.%s%s To wait longer, set TIMEOUT in the configuration or start with -timeout, as in: beastiepilot -timeout 10m",
+			p.cfg.Model, p.cfg.Timeout, whySlow(p.cfg), p.muchToRead())
 		return exitError
 	case errors.Is(err, context.Canceled):
 		p.fail("interrupted")
@@ -551,6 +573,20 @@ func (p *pilot) queryFailure(err error) int {
 		p.fail("%v", err)
 		return exitError
 	}
+}
+
+// muchToRead says, as a sentence to follow the complaint that the model did
+// not answer in time, that many earlier requests went along with the one it
+// was given, or "" when few did.
+func (p *pilot) muchToRead() string {
+	if p.sent < manyPast {
+		return ""
+	}
+	text := fmt.Sprintf(" The model had %d earlier requests to read with this one: a lower HISTORY gives it less", p.sent)
+	if p.inSession {
+		text += ", and /clear forgets them"
+	}
+	return text + "."
 }
 
 // whySlow says what Ollama reports about the model that did not answer in
@@ -627,8 +663,12 @@ Ollama model, then asks for confirmation before running it. With -type guided
 it also explains the command. Commands listed in AUTO_RUN run without asking.
 
 With no request it opens a session on the terminal and takes requests one
-after another, each building on the ones before. /help lists what else can be
-typed there; /exit or Ctrl-D leaves.
+after another. /help lists what else can be typed there; /exit or Ctrl-D
+leaves.
+
+A request can build on the ones before it: the last HISTORY requests, with the
+command given for each and what came of it, are kept from one run to the next
+and go to the model along with each new one, as many as fit in CONTEXT.
 
 The single word "configure" sets the machine up instead: it offers to install
 and start Ollama, download the models, install the FreeBSD source tree and
@@ -659,10 +699,14 @@ Configuration:
   Keys: %s.
   Each can also be set as BEASTIEPILOT_<KEY> in the environment; flags win.
 
+Files:
+  %s
+        the earlier requests; /clear in a session, or removing it, forgets them
+
 Environment:
   BEASTIEPILOT_CONFIG  read this file instead of the default locations
   NO_COLOR             disable colored output when set
-`, systemConfigPath, userConfigPath(), strings.Join(wrap(strings.Join(settingKeys, ", "), 70), "\n        "))
+`, systemConfigPath, userConfigPath(), strings.Join(wrap(strings.Join(settingKeys, ", "), 70), "\n        "), historyPath())
 }
 
 // buildVersion prefers the linker-provided version and falls back to the
@@ -711,10 +755,11 @@ func hostNotices() []string {
 }
 
 // suggest asks the Ollama model at endpoint to translate intent into a shell
-// command under the given system prompt and returns the model's raw reply.
-func suggest(ctx context.Context, endpoint, model, system, intent string) (string, error) {
+// command under the given system prompt, in a context of window tokens, and
+// returns the model's raw reply.
+func suggest(ctx context.Context, endpoint, model string, window int, system, intent string) (string, error) {
 	// Temperature 0 keeps suggestions as deterministic as the model allows.
-	options := map[string]any{"temperature": 0, "num_ctx": contextTokens}
+	options := map[string]any{"temperature": 0, "num_ctx": window}
 	body, err := json.Marshal(generateRequest{
 		Model:   model,
 		System:  system,
@@ -1131,7 +1176,7 @@ func appendUnique(list []string, s string) []string {
 
 // printDetails shows, for VERBOSE, where the suggestion came from. The raw
 // reply is quoted so that nothing in it can affect the terminal.
-func printDetails(ui styler, cfg settings, configFiles []string, elapsed time.Duration, reply, command string, excerpts []hit) {
+func printDetails(ui styler, cfg settings, configFiles []string, elapsed time.Duration, reply, command string, excerpts []hit, history string) {
 	config := "none (defaults)"
 	if len(configFiles) > 0 {
 		config = strings.Join(configFiles, ", ")
@@ -1144,6 +1189,9 @@ func printDetails(ui styler, cfg settings, configFiles []string, elapsed time.Du
 	}
 	if cfg.AutoRun != "" {
 		rows = append(rows, [2]string{"auto-run", cfg.AutoRun})
+	}
+	if history != "" {
+		rows = append(rows, [2]string{"history", history})
 	}
 	for _, e := range excerpts {
 		// Excerpts were cleaned of control characters when they were indexed.

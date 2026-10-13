@@ -28,6 +28,20 @@
 # How long to wait for the model before giving up (for example 90s or 5m).
 #TIMEOUT=2m
 
+# The context window asked of Ollama with every request, in tokens. It holds
+# the instructions, the excerpts of reference material, the earlier requests
+# (see HISTORY) and yours. A larger one takes more memory, and what fills it
+# takes the model longer to read. From 4096 to 131072.
+#CONTEXT=4096
+
+# How many earlier requests go to the model with each new one, with the
+# command it gave for each and what came of it, so that a request can build
+# on the ones before: "the same for /var". They are kept in
+# ~/.local/state/beastiepilot/history from one run to the next. When the last
+# HISTORY of them do not fit in CONTEXT, the oldest stay behind. 0 keeps and
+# sends none. From 0 to 1000.
+#HISTORY=100
+
 # What to do with a suggestion:
 #   guided  show the command, explain what each part does and why, then ask
 #   safe    show the command, then ask

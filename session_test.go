@@ -36,39 +36,6 @@ func TestSessionCommand(t *testing.T) {
 	}
 }
 
-func TestSessionSection(t *testing.T) {
-	if got := sessionSection(nil); got != "" {
-		t.Errorf("with nothing before: %q, want nothing", got)
-	}
-
-	p := &pilot{}
-	p.remember("list the\ndatasets", "zfs list", "it ran and exited with status 0")
-	p.remember("restart the web server", "", "you gave no command: which web server?")
-	got := sessionSection(p.past)
-	for _, want := range []string{
-		"EARLIER IN THIS SESSION",
-		"reply with the command only",
-		"\n[1] Request: list the datasets\n    Command: zfs list\n    Outcome: it ran and exited with status 0\n",
-		"\n[2] Request: restart the web server\n    Outcome: you gave no command: which web server?\n",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("the section lacks %q:\n%s", want, got)
-		}
-	}
-
-	// Only the last few are kept, and a long one is cut.
-	for i := 0; i < maxPast+3; i++ {
-		p.remember(strings.Repeat("x", maxPastChars+50), "true", "the user chose not to run it")
-	}
-	got = sessionSection(p.past)
-	if len(p.past) != maxPast || strings.Contains(got, "zfs list") || strings.Contains(got, "[6]") {
-		t.Errorf("%d requests kept, want the last %d only:\n%s", len(p.past), maxPast, got)
-	}
-	if want := "Request: " + strings.Repeat("x", maxPastChars) + " ...\n"; !strings.Contains(got, want) {
-		t.Errorf("a long request was not cut to %d characters:\n%s", maxPastChars, got)
-	}
-}
-
 // TestSession runs a session the plain way, with the lines a terminal would
 // hand over, against a stand-in for Ollama.
 func TestSession(t *testing.T) {
@@ -144,7 +111,7 @@ func TestSession(t *testing.T) {
 	}
 
 	// The first request goes alone; the third goes with the two before it.
-	if strings.Contains(asked[0].System, "EARLIER IN THIS SESSION") {
+	if strings.Contains(asked[0].System, "EARLIER REQUESTS") {
 		t.Errorf("the first request came with a history:\n%s", asked[0].System)
 	}
 	for _, want := range []string{
@@ -158,7 +125,7 @@ func TestSession(t *testing.T) {
 	// The explanation is about one command and takes no history, and /clear
 	// forgets what came before it.
 	for _, i := range []int{3, 4, 5} {
-		if strings.Contains(asked[i].System, "EARLIER IN THIS SESSION") {
+		if strings.Contains(asked[i].System, "EARLIER REQUESTS") {
 			t.Errorf("request %d came with a history, and should not:\n%s", i+1, asked[i].System)
 		}
 	}
@@ -167,6 +134,9 @@ func TestSession(t *testing.T) {
 	for _, want := range []string{
 		"Say what you want to do",
 		"Session commands",
+		"/clear clear the screen and forget the earlier requests, for good",
+		"Up to 100 earlier requests, from this session and the ones before it, go to the model along with each new one,",
+		"The earlier requests are forgotten.",
 		"Which web server?",
 		"Guided mode: each command comes with an explanation.",
 		"Shows how full each filesystem is.",

@@ -15,6 +15,8 @@ MODEL=qwen2.5-coder
 EMBED_MODEL=mxbai-embed-large
 endpoint = "http://10.0.0.5:11434/api/generate"   # quoted, with a comment
 TIMEOUT='90s'
+CONTEXT=8192
+history = 25   # how many go along
 type=GUIDED
 AUTO_RUN = df ,  zfs   list, service * status
 PACKAGE_MANAGER=PORTS # trailing comment
@@ -33,6 +35,8 @@ Verbose=true
 		EmbedModel:     "mxbai-embed-large",
 		Endpoint:       "http://10.0.0.5:11434/api/generate",
 		Timeout:        90 * time.Second,
+		Context:        8192,
+		History:        25,
 		Type:           typeGuided,
 		AutoRun:        "df, zfs list, service * status",
 		PackageManager: "ports",
@@ -53,6 +57,13 @@ func TestParseSettingsErrors(t *testing.T) {
 		{"just words\n", "test.conf:1: expected KEY=value"},
 		{"\n\nTIMEOUT=soon\n", "test.conf:3: TIMEOUT:"},
 		{"TIMEOUT=-5s\n", "not a positive duration"},
+		{"CONTEXT=2048\n", "CONTEXT: \"2048\" is not a number of tokens from 4096 to 131072"},
+		{"CONTEXT=8k\n", "is not a number of tokens"},
+		{"CONTEXT=1000000\n", "is not a number of tokens"},
+		{"HISTORY=-1\n", "HISTORY: \"-1\" is not a number of requests from 0 to 1000"},
+		{"HISTORY=all\n", "is not a number of requests"},
+		{"HISTORY=1001\n", "is not a number of requests"},
+		{"HISTORY=\n", "is not a number of requests"},
 		{"PACKAGE_MANAGER=apt\n", "use pkg or ports"},
 		{"VERBOSE=maybe\n", "not a boolean"},
 		{"TYPE=auto\n", "use guided or safe"},
@@ -300,7 +311,8 @@ func TestPathSettings(t *testing.T) {
 func TestSettingsGet(t *testing.T) {
 	want := settings{
 		Model: "qwen2.5-coder:7b", EmbedModel: "bge-m3", Endpoint: "http://10.0.0.5:11434/api/generate",
-		Timeout: 90 * time.Second, Type: typeGuided, AutoRun: "df, zfs list, service * status", PackageManager: "ports",
+		Timeout: 90 * time.Second, Context: 16384, History: 0, Type: typeGuided,
+		AutoRun: "df, zfs list, service * status", PackageManager: "ports",
 		SourcePath: "/usr/src-14", DocsSource: "/usr/share/doc:/usr/local/share/doc/freebsd", RagSource: "/home/me/My Books",
 		Banner: bannerCompact, Verbose: true,
 	}

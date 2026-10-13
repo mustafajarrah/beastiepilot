@@ -34,8 +34,12 @@ thinking; see [The banner](#the-banner).
 - **Human in the loop.** Every suggestion is displayed in full and needs an
   explicit answer typed at the terminal; the default answer is *no*.
 - **A session when you want one.** Run `beastiepilot` by itself and it takes
-  requests one after another, with a line editor, the earlier requests within
-  reach of the arrow keys, and each request able to build on the last.
+  requests one after another, with a line editor and the earlier requests
+  within reach of the arrow keys.
+- **It remembers what you asked.** Your last 100 requests, with the command
+  given for each and what came of it, are kept from one run to the next and go
+  to the model with each new one, so that a request can build on the ones
+  before. See [History](#history).
 - **Two modes.** `safe` shows the command and asks; `guided` also explains what
   each part of it does and why. See [Modes](#modes).
 - **You choose what needs no question.** List the commands you consider
@@ -282,10 +286,11 @@ Each request is handled as it would be from the command line: the command is
 shown, explained in `guided` mode, and run once you agree. Then the box comes
 back for the next one.
 
-- **Requests build on each other.** The last five requests go to the model
+- **Requests build on each other.** The earlier requests go to the model
   with each new one, together with the command it gave and what came of it, so
-  that `the same for /var` or `now only the snapshots` mean something. The
-  output of the commands is not sent. `/clear` forgets them.
+  that `the same for /var` or `now only the snapshots` mean something. They
+  include the ones from earlier sessions; see [History](#history). `/clear`
+  forgets them.
 - **Editing.** Left, Right, Home, End, Backspace and Delete, and the Emacs
   keys a shell has (Ctrl-A, Ctrl-E, Ctrl-U, Ctrl-K, Ctrl-W). Up and Down bring
   back the earlier requests of the session. A line longer than the terminal
@@ -308,7 +313,7 @@ back for the next one.
 | Command   | What it does                                            |
 | --------- | ------------------------------------------------------- |
 | `/type`   | Choose what is done with each command, from now on      |
-| `/clear`  | Clear the screen and forget the earlier requests        |
+| `/clear`  | Clear the screen and forget the earlier requests, for good |
 | `/help`   | List these commands                                     |
 | `/exit`   | Leave                                                   |
 
@@ -334,6 +339,42 @@ still a request. Flags apply to the whole session: `beastiepilot -type guided
 -model qwen2.5-coder`. The session needs a terminal; on one that cannot be
 read key by key (`TERM=dumb`) it falls back to a plain prompt without the box
 and the arrow keys, and to a numbered list for the menu.
+
+### History
+
+Every request is kept with the command the model gave for it and what came of
+it: whether it ran, as whom and with what exit status, that you turned it
+down, or that the model gave no command and why. What a command printed is
+never kept. The last `HISTORY` of them, 100 unless you say otherwise, go to
+the model along with each new request, from the command line as well as in a
+session, so a request can refer to one made last week.
+
+```console
+$ beastiepilot "show the free disk space"
+$ beastiepilot "the same for /var only"
+```
+
+- **Where.** In `~/.local/state/beastiepilot/history` (or under
+  `$XDG_STATE_HOME`), one request to a line, as JSON, readable by you alone.
+  Each field is cut to 300 characters. The file holds up to twice `HISTORY`
+  requests; older ones are dropped from it.
+- **How many go along.** The last `HISTORY`, or as many of those as fit in the
+  context once the instructions, the excerpts of
+  [reference material](#reference-material) and your request are in it; when
+  not all fit, the oldest stay behind. By BeastiePilot's own estimate, the
+  default `CONTEXT` of 4096 tokens has room for about 50 requests of ordinary
+  length, and for about 15 next to three excerpts of an index. `CONTEXT=8192`
+  has room for about 120 and 90, and `CONTEXT=16384` for all 100 either way.
+  `-verbose` says how many went along with a request.
+- **What it costs.** Everything that goes along is read by the model before it
+  answers, so a long history makes each answer slower, noticeably so on a
+  machine without a GPU, and a larger `CONTEXT` takes more memory. If the
+  model stops answering within `TIMEOUT`, lower `HISTORY` before raising
+  `CONTEXT`. Changing `CONTEXT` makes Ollama load the model again, once.
+- **Forgetting.** `/clear` in a session, or removing the file, forgets every
+  request. `HISTORY=0` keeps none and sends none: each request then goes by
+  itself, and a file that is already there is left as it is. `beastiepilot
+  -history 0 "..."` does that for one request.
 
 ### Examples
 
@@ -577,6 +618,8 @@ Every setting has a key for the file, an environment variable and a flag.
 | `EMBED_MODEL`     | `BEASTIEPILOT_EMBED_MODEL`     | `-embed-model`     | `nomic-embed-text`                    | Ollama model that embeds text for the index                   |
 | `ENDPOINT`        | `BEASTIEPILOT_ENDPOINT`        | `-endpoint`        | `http://localhost:11434/api/generate` | Ollama generate API URL                                       |
 | `TIMEOUT`         | `BEASTIEPILOT_TIMEOUT`         | `-timeout`         | `2m`                                  | How long to wait for the model                                |
+| `CONTEXT`         | `BEASTIEPILOT_CONTEXT`         | `-context`         | `4096`                                | Context window asked of Ollama, in tokens, from 4096 to 131072 |
+| `HISTORY`         | `BEASTIEPILOT_HISTORY`         | `-history`         | `100`                                 | Earlier requests kept and sent with each new one, from 0 to 1000; see [History](#history) |
 | `TYPE`            | `BEASTIEPILOT_TYPE`            | `-type`            | `safe`                                | `guided` or `safe`; see [Modes](#modes)                       |
 | `AUTO_RUN`        | `BEASTIEPILOT_AUTO_RUN`        | `-auto-run`        | *(empty)*                             | Commands `safe` mode runs without asking, comma-separated     |
 | `PACKAGE_MANAGER` | `BEASTIEPILOT_PACKAGE_MANAGER` | `-package-manager` | `pkg`                                 | Install software with `pkg` (binary packages) or `ports`      |
@@ -689,8 +732,9 @@ the vectors are stored in `~/.cache/beastiepilot/index` (or under
 `$XDG_CACHE_HOME`). For each request BeastiePilot embeds the request, finds the
 three closest excerpts and appends them to the system prompt. `-verbose` shows
 which excerpts were used and how similar they were. Every request asks Ollama
-for a context of 4096 tokens, which holds all of that, whatever the server's
-own default is.
+for a context of `CONTEXT` tokens, 4096 unless you change it, whatever the
+server's own default is. That holds the instructions, the excerpts and your
+request, and the room left over goes to the [history](#history).
 
 **Keeping it current.** Run `beastiepilot -index` again after adding files or
 upgrading the system. Only new and changed files are embedded, and a run you
@@ -777,6 +821,12 @@ prompt only steers the model; the protections below are enforced in code.
   to the model and not a safeguard. Everything above still applies to whatever
   it suggests, but index only material you trust, particularly alongside
   `AUTO_RUN`.
+- **The history is a file, and it steers the model too.** What you asked and
+  what was suggested stay on disk, readable by you alone, until they scroll
+  out of the file or you [forget them](#history); a password typed into a
+  request would stay there with it. And an answer that was wrong once keeps
+  going along with later requests, where a small model may repeat it: when
+  the suggestions start to echo an old mistake, `/clear`.
 - **No sandbox.** Commands run through `/bin/sh -c` with the privileges of the
   user who invoked BeastiePilot, so run it as yourself and not as root, where
   every suggestion would have the run of the machine.
@@ -797,9 +847,10 @@ prompt only steers the model; the protections below are enforced in code.
 Your request, the system prompt, and a few facts about the host: the output of
 `uname -sr`, the CPU architecture, whether you are root, and the current
 working directory. In `guided` mode a second request carries your request and
-the suggested command. In a [session](#the-session), up to five earlier
-requests go along as well, each with the command suggested for it and whether
-it ran and with what exit status; the output of the commands does not.
+the suggested command. Your earlier requests go along as well, up to `HISTORY`
+of them and as many as fit, each with the command suggested for it and whether
+it ran and with what exit status; the output of the commands does not. See
+[History](#history).
 
 With an index, the request is also sent to the embedding model, and up to three
 excerpts of the indexed files travel with it to the model that writes the

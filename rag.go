@@ -22,7 +22,7 @@ import (
 
 const (
 	// maxExcerpts is how many excerpts accompany a request. Each is at most
-	// chunkMax bytes, which keeps the whole prompt well inside contextTokens.
+	// chunkMax bytes, which keeps the whole prompt well inside minContext.
 	maxExcerpts = 3
 
 	// maxEmbedBytes caps the size of an embedding reply.

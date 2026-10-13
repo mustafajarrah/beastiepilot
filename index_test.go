@@ -467,16 +467,16 @@ func TestPlanIndex(t *testing.T) {
 	}
 }
 
-// Every request asks for the same context window, whatever the server's
-// default is.
+// Every request asks for the context window it is given, whatever the
+// server's default is.
 func TestSuggestContextWindow(t *testing.T) {
 	var requests []map[string]any
 	srv := fakeOllama(t, &requests)
-	if _, err := suggest(context.Background(), srv.URL+"/api/generate", "m", "system", "request"); err != nil {
+	if _, err := suggest(context.Background(), srv.URL+"/api/generate", "m", 8192, "system", "request"); err != nil {
 		t.Fatal(err)
 	}
 	options, _ := requests[0]["options"].(map[string]any)
-	if options["num_ctx"] != float64(contextTokens) || options["temperature"] != float64(0) {
-		t.Errorf("options were %v; want num_ctx %d and temperature 0", options, contextTokens)
+	if options["num_ctx"] != float64(8192) || options["temperature"] != float64(0) {
+		t.Errorf("options were %v; want num_ctx 8192 and temperature 0", options)
 	}
 }

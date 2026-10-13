@@ -46,6 +46,8 @@ type settings struct {
 	EmbedModel     string        // EMBED_MODEL: the model that embeds text for the index
 	Endpoint       string        // ENDPOINT
 	Timeout        time.Duration // TIMEOUT
+	Context        int           // CONTEXT: the context window asked of Ollama, in tokens
+	History        int           // HISTORY: how many earlier requests go along with a new one
 	Type           string        // TYPE: typeGuided or typeSafe
 	AutoRun        string        // AUTO_RUN: commands safe mode runs unasked, as parseAutoRun returns them
 	PackageManager string        // PACKAGE_MANAGER: "pkg" or "ports"
@@ -57,8 +59,8 @@ type settings struct {
 }
 
 // settingKeys lists the configuration keys in the order they are documented.
-var settingKeys = []string{"MODEL", "EMBED_MODEL", "ENDPOINT", "TIMEOUT", "TYPE", "AUTO_RUN", "PACKAGE_MANAGER",
-	"SOURCE_PATH", "DOCS_SOURCE", "RAG_SOURCE", "BANNER", "VERBOSE"}
+var settingKeys = []string{"MODEL", "EMBED_MODEL", "ENDPOINT", "TIMEOUT", "CONTEXT", "HISTORY", "TYPE", "AUTO_RUN",
+	"PACKAGE_MANAGER", "SOURCE_PATH", "DOCS_SOURCE", "RAG_SOURCE", "BANNER", "VERBOSE"}
 
 func defaultSettings() settings {
 	return settings{
@@ -66,6 +68,8 @@ func defaultSettings() settings {
 		EmbedModel:     defaultEmbedModel,
 		Endpoint:       defaultEndpoint,
 		Timeout:        defaultTimeout,
+		Context:        defaultContext,
+		History:        defaultHistory,
 		Type:           typeSafe,
 		PackageManager: "pkg",
 		SourcePath:     defaultSourcePath,
@@ -98,6 +102,18 @@ func (s *settings) set(key, value string) error {
 			return fmt.Errorf("%q is not a positive duration such as 90s or 2m", value)
 		}
 		s.Timeout = d
+	case "CONTEXT":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < minContext || n > maxContext {
+			return fmt.Errorf("%q is not a number of tokens from %d to %d", value, minContext, maxContext)
+		}
+		s.Context = n
+	case "HISTORY":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 0 || n > maxHistory {
+			return fmt.Errorf("%q is not a number of requests from 0 to %d", value, maxHistory)
+		}
+		s.History = n
 	case "PACKAGE_MANAGER":
 		v := strings.ToLower(value)
 		if v != "pkg" && v != "ports" {
@@ -168,6 +184,10 @@ func (s settings) get(key string) string {
 		return s.Endpoint
 	case "TIMEOUT":
 		return s.Timeout.String()
+	case "CONTEXT":
+		return strconv.Itoa(s.Context)
+	case "HISTORY":
+		return strconv.Itoa(s.History)
 	case "TYPE":
 		return s.Type
 	case "AUTO_RUN":
