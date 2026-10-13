@@ -336,8 +336,22 @@ func TestConfirm(t *testing.T) {
 	}
 	ui := styler{out: io.Discard}
 	for _, tt := range tests {
-		if got := confirm(ui, strings.NewReader(tt.input), tt.strict); got != tt.want {
-			t.Errorf("confirm(%q, strict=%v) = %v, want %v", tt.input, tt.strict, got, tt.want)
+		// Running as root changes the words of the question, not what counts.
+		for _, asRoot := range []bool{false, true} {
+			if got := confirm(ui, strings.NewReader(tt.input), tt.strict, asRoot); got != tt.want {
+				t.Errorf("confirm(%q, strict=%v, asRoot=%v) = %v, want %v", tt.input, tt.strict, asRoot, got, tt.want)
+			}
+		}
+	}
+
+	for want, asked := range map[string]string{
+		"  ? Execute this command? [y/N] ":                     question(ui, false, false),
+		"  ? Execute this command as root? [y/N] ":             question(ui, false, true),
+		`  ? Type "yes" to execute it anyway [yes/N] `:         question(ui, true, false),
+		`  ? Type "yes" to execute it as root anyway [yes/N] `: question(ui, true, true),
+	} {
+		if asked != want {
+			t.Errorf("the question is %q, want %q", asked, want)
 		}
 	}
 }

@@ -142,9 +142,9 @@ func (p *pilot) keyed(fresh bool, read func() error) error {
 // the question was on screen does not count: it could only approve a command
 // that had not been seen. In a session the answer is read key by key, so that
 // Ctrl-C means no and not the end of the session.
-func (p *pilot) confirm(strict bool) bool {
+func (p *pilot) confirm(strict, asRoot bool) bool {
 	if p.inSession {
-		ed := &lineEditor{ui: p.ui, in: p.tty, columns: p.columns, prompt: question(p.ui, strict)}
+		ed := &lineEditor{ui: p.ui, in: p.tty, columns: p.columns, prompt: question(p.ui, strict, asRoot)}
 		answer, err := p.edit(ed, true)
 		if err == nil {
 			return consent(answer, strict)
@@ -156,7 +156,7 @@ func (p *pilot) confirm(strict bool) bool {
 	if p.tty != nil {
 		discardInput(p.tty)
 	}
-	return confirm(p.ui, p.in, strict)
+	return confirm(p.ui, p.in, strict, asRoot)
 }
 
 // columns returns the width of the terminal, or 0 if it is unknown.

@@ -292,7 +292,7 @@ func run() int {
 		return newSetup(ui, tty, cfg, saved, file, thisMachine(tty)).run()
 	}
 
-	p := &pilot{ui: ui, cfg: cfg, configFiles: configFiles}
+	p := &pilot{ui: ui, cfg: cfg, configFiles: configFiles, root: os.Geteuid() == 0}
 	if tty != nil {
 		p.tty, p.in = tty, tty
 	}
@@ -311,6 +311,7 @@ type pilot struct {
 	in          io.Reader // where approval is read from: the terminal, or nil
 	cfg         settings
 	configFiles []string
+	root        bool       // whoever runs this is root
 	animate     bool       // the banner is right above, to animate while waiting
 	inSession   bool       // requests come one after another, on the terminal
 	past        []exchange // the earlier requests of the session
@@ -362,6 +363,14 @@ func (p *pilot) answer(intent string) int {
 
 	rev := inspect(command)
 	rev.notices = append(rev.notices, hostNotices()...)
+	// A command that only root can run goes through the tool this machine has
+	// for that, once the user has agreed to it.
+	var raise *elevation
+	if name := needsRoot(command); name != "" && !p.root {
+		e := asRoot(command, exec.LookPath)
+		raise = &e
+		rev.notices = append(rev.notices, e.notice(name))
+	}
 	if retrieveErr != nil {
 		reason := retrieveErr.Error()
 		if errors.Is(retrieveErr, context.DeadlineExceeded) {
@@ -387,13 +396,15 @@ func (p *pilot) answer(intent string) int {
 
 	// Decide whether to run it. The question is skipped only in safe mode, for
 	// a command made entirely of AUTO_RUN entries that inspect did not flag as
-	// destructive.
+	// destructive and that runs as the user.
 	destructive := len(rev.dangers) > 0
 	auto, why := false, ""
 	switch {
 	case cfg.Type != typeSafe || cfg.AutoRun == "":
 	case destructive:
 		why = "it looks destructive"
+	case raise != nil:
+		why = "it would run as root"
 	default:
 		auto, why = autoRun(command, cfg.autoRunList())
 	}
@@ -407,7 +418,7 @@ func (p *pilot) answer(intent string) int {
 		p.fail("no terminal available to ask for confirmation; nothing was executed")
 		return exitError
 	default:
-		if !p.confirm(destructive) {
+		if !p.confirm(destructive, raise != nil) {
 			fmt.Fprintf(ui.out, "  %s\n", ui.paint(dim, "Aborted. Nothing was executed."))
 			p.remember(intent, command, "the user chose not to run it")
 			return exitOK
@@ -415,13 +426,17 @@ func (p *pilot) answer(intent string) int {
 		fmt.Fprintln(ui.out)
 	}
 
-	code, err := execute(command)
+	run, how := func() (int, error) { return execute(command) }, "it ran"
+	if raise != nil {
+		run, how = raise.execute, "it ran as root"
+	}
+	code, err := run()
 	if err != nil {
 		p.fail("%v", err)
 		p.remember(intent, command, "it could not be run")
 		return exitError
 	}
-	outcome, status := fmt.Sprintf("it ran and exited with status %d", code), fmt.Sprintf("Exit status %d", code)
+	outcome, status := fmt.Sprintf("%s and exited with status %d", how, code), fmt.Sprintf("Exit status %d", code)
 	if name := foundNothing(command, code); name != "" {
 		// Said to the model as well, so that the next request can build on it.
 		outcome += ", as " + name + " does when nothing matches"
@@ -1106,27 +1121,35 @@ func printSuggestion(ui styler, model, command string, rev review) {
 		fmt.Fprintf(ui.out, "  %s %s %s\n", ui.paint(boldRed, "!"), ui.paint(boldRed, "High risk:"), d)
 	}
 	for _, n := range rev.notices {
-		fmt.Fprintf(ui.out, "  %s %s\n", ui.paint(boldYellow, "!"), n)
+		// A long one continues under its own words, not under the mark.
+		mark := ui.paint(boldYellow, "!")
+		for _, line := range wrap(n, textWidth(ui)) {
+			fmt.Fprintf(ui.out, "  %s %s\n", mark, line)
+			mark = " "
+		}
 	}
 	if len(rev.dangers)+len(rev.notices) > 0 {
 		fmt.Fprintln(ui.out)
 	}
 }
 
-// printExplanation shows the model's account of the suggested command,
-// wrapped to fit the terminal.
-func printExplanation(ui styler, explanation string) {
+// textWidth returns how wide a line of running text may be: what fits the
+// terminal with a margin on both sides, and no more than reads well.
+func textWidth(ui styler) int {
 	width := 76
 	if f, ok := ui.out.(*os.File); ok {
 		if cols, _, ok := termSize(f); ok && cols-6 < width {
 			width = cols - 6
 		}
 	}
-	if width < 20 {
-		width = 20
-	}
+	return max(width, 20)
+}
+
+// printExplanation shows the model's account of the suggested command,
+// wrapped to fit the terminal.
+func printExplanation(ui styler, explanation string) {
 	fmt.Fprintf(ui.out, "  %s %s\n\n", ui.paint(boldCyan, ">"), ui.paint(bold, "Why this command"))
-	for _, line := range wrap(explanation, width) {
+	for _, line := range wrap(explanation, textWidth(ui)) {
 		fmt.Fprintf(ui.out, "    %s\n", line)
 	}
 	fmt.Fprintln(ui.out)
@@ -1136,9 +1159,10 @@ func printExplanation(ui styler, explanation string) {
 // answer from in. Only explicit consent counts: "y" or "yes" normally, and
 // the full word "yes" when strict is set because the command looks
 // destructive. An empty line, any other input, end of input or a read error
-// all mean no.
-func confirm(ui styler, in io.Reader, strict bool) bool {
-	fmt.Fprint(ui.out, question(ui, strict))
+// all mean no. asRoot says that the command would run as root, which the
+// question then spells out.
+func confirm(ui styler, in io.Reader, strict, asRoot bool) bool {
+	fmt.Fprint(ui.out, question(ui, strict, asRoot))
 	answer, err := readLine(in)
 	if err != nil {
 		fmt.Fprintln(ui.out) // the user never pressed Enter
@@ -1149,16 +1173,20 @@ func confirm(ui styler, in io.Reader, strict bool) bool {
 
 // question returns the words that ask for approval, up to where the answer
 // is typed.
-func question(ui styler, strict bool) string {
+func question(ui styler, strict, asRoot bool) string {
+	who := ""
+	if asRoot {
+		who = " as root"
+	}
 	if strict {
 		return fmt.Sprintf("  %s %s %s ",
 			ui.paint(boldRed, "?"),
-			ui.paint(bold, `Type "yes" to execute it anyway`),
+			ui.paint(bold, `Type "yes" to execute it`+who+` anyway`),
 			ui.paint(dim, "[yes/N]"))
 	}
 	return fmt.Sprintf("  %s %s %s ",
 		ui.paint(boldYellow, "?"),
-		ui.paint(bold, "Execute this command?"),
+		ui.paint(bold, "Execute this command"+who+"?"),
 		ui.paint(dim, "[y/N]"))
 }
 
@@ -1191,7 +1219,11 @@ func readLine(r io.Reader) (string, error) {
 // stderr attached and returns the command's exit code. The error is non-nil
 // only if the shell could not be run at all.
 func execute(command string) (int, error) {
-	cmd := exec.Command("/bin/sh", "-c", command)
+	return runCommand(exec.Command("/bin/sh", "-c", command))
+}
+
+// runCommand runs cmd as execute describes.
+func runCommand(cmd *exec.Cmd) (int, error) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -1218,5 +1250,5 @@ func execute(command string) (int, error) {
 		}
 		return exitError, nil
 	}
-	return exitError, fmt.Errorf("running /bin/sh: %w", err)
+	return exitError, fmt.Errorf("running %s: %w", cmd.Args[0], err)
 }

@@ -44,6 +44,10 @@ who wags his tail and blinks while the model is thinking; see
 - **Extra friction where it matters.** Commands that look destructive
   (`rm -r`, `zfs destroy`, `dd` to a device, `pfctl -d`, ...) are flagged and
   need the full word `yes`, not a reflexive `y`.
+- **Root for one command, not for the program.** Run it as yourself: a command
+  that only root can run, such as `pkg install`, is offered to run as root
+  through `doas`, `sudo` or `su`. See
+  [Commands that need root](#commands-that-need-root).
 - **Reads the manual first.** Optionally, BeastiePilot indexes the manual
   pages, the system documentation and your own notes and books, and hands the
   model the passages closest to each request. See
@@ -414,6 +418,48 @@ $ beastiepilot -type guided list the jails with their details
 The explanation comes from the same model that wrote the command, so it can be
 just as wrong. Treat it as an aid to reading the command, not as a guarantee.
 
+### Commands that need root
+
+Run BeastiePilot as yourself. A command that only root can run is not left to
+fail with `Insufficient privileges`: BeastiePilot says so before the question
+and, on a yes, runs that one command as root.
+
+```console
+$ beastiepilot install nginx
+
+  > Suggested command (llama3.2)
+
+    pkg install nginx
+
+  ! pkg install needs root, and you are not root: on a yes, the command runs as
+    root through su, which asks for root's password.
+
+  ? Execute this command as root? [y/N] y
+
+Password:
+```
+
+- **Who asks for the password.** `doas` when it is installed, otherwise
+  `sudo`, otherwise `su`, which the base system has and which gives root to
+  the members of the `wheel` group who know root's password. The password goes
+  to that tool, never to BeastiePilot.
+- **What runs.** The whole line, exactly as shown, through `/bin/sh` as root.
+- **What counts as needing root.** The common commands that change a FreeBSD
+  system: `pkg install`, `delete`, `upgrade` and the like; `service` with
+  `start`, `stop`, `restart` or `enable`; `sysrc` and `sysctl` when they set a
+  value; `freebsd-update`; `pw`, `adduser` and `rmuser`; `kldload`; `mount`
+  and `umount`; `zfs`, `zpool`, `bectl` and `gpart` when they change
+  something; `pfctl`, `ipfw`, `shutdown` and `reboot`; installing a port. The
+  same commands asking a question, as in `pkg info`, `service sshd status` or
+  `zfs list`, run as you.
+- **Everything else runs as you.** So does a line that cannot be taken apart
+  with certainty, such as one with `$(...)` or a redirection to a file. If it
+  needed root after all, it fails with its own message.
+- **It always asks.** `AUTO_RUN` does not cover a command that would run as
+  root.
+- **If you are root already**, none of this applies: the command runs like any
+  other, under the notice that you are root.
+
 ### Running trusted commands without asking
 
 Answering `y` to `df -h` gets old quickly. The `AUTO_RUN` setting lists the
@@ -455,6 +501,8 @@ exactly: `df` does not cover `/tmp/df` or `./df`.
   redirection other than to `/dev/null` (`2>/dev/null` and `2>&1` are fine), no
   comments, a single line.
 - It was not flagged as destructive (see [Safety](#safety)).
+- It would not run as root (see
+  [Commands that need root](#commands-that-need-root)).
 - The mode is `safe`. `guided` always asks.
 
 Anything else falls back to the usual question. With `-verbose`, BeastiePilot
@@ -723,15 +771,20 @@ prompt only steers the model; the protections below are enforced in code.
   to the model and not a safeguard. Everything above still applies to whatever
   it suggests, but index only material you trust, particularly alongside
   `AUTO_RUN`.
-- **No sandbox, no privilege changes.** Commands run through `/bin/sh -c` with
-  the privileges of the user who invoked BeastiePilot. Avoid running it as root
-  unless the task requires it.
-- **`configure` is the one place that asks for root.** Its commands are fixed
-  in the program, not written by the model: installing packages, enabling the
-  Ollama service, unpacking the source tree, copying the program. Each is
-  shown and needs a yes, and it is `doas`, `sudo` or `su` that asks for the
-  password, not BeastiePilot. The source tree is downloaded over HTTPS from
-  `download.FreeBSD.org`, without the checksum comparison the installer makes.
+- **No sandbox.** Commands run through `/bin/sh -c` with the privileges of the
+  user who invoked BeastiePilot, so run it as yourself and not as root, where
+  every suggestion would have the run of the machine.
+- **Root is asked for one command at a time.** A command recognized as needing
+  root runs as root only after a question that says so, never through
+  `AUTO_RUN`, and it is `doas`, `sudo` or `su` that asks for the password, not
+  BeastiePilot. It is still a command a model wrote, now with nothing to stop
+  it: read it twice. See [Commands that need root](#commands-that-need-root).
+- **`configure` asks for root with commands of its own.** They are fixed in the
+  program, not written by the model: installing packages, enabling the Ollama
+  service, unpacking the source tree, copying the program. Each is shown and
+  needs a yes, and here too the password goes to `doas`, `sudo` or `su`. The
+  source tree is downloaded over HTTPS from `download.FreeBSD.org`, without
+  the checksum comparison the installer makes.
 
 ### What is sent to the model
 
