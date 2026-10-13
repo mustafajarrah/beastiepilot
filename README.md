@@ -11,11 +11,6 @@ to you, and runs it only after you say yes.
 ```console
 $ beastiepilot install nginx and enable it at boot
 
-  █▖ ▗▄▄▖ ▗█   BeastiePilot v0.3.3
-  ▝█▟████▙█▘   llama3.2 · localhost:11434
-   ██▀██▀██    ~/projects/web
-   ▀██▀▀██▀    safe mode
-
   > Suggested command (llama3.2)
 
     pkg install -y nginx && sysrc nginx_enable=YES
@@ -23,9 +18,9 @@ $ beastiepilot install nginx and enable it at boot
   ? Execute this command? [y/N]
 ```
 
-On a roomy color terminal that mascot is replaced by the pixel-art Beastie at
-the top of this page, at the yoke of an airplane, who wags his tail and blinks
-while the model is thinking; see [The banner](#the-banner).
+Each run opens with a banner: Beastie as you see him above, at the yoke of an
+airplane, wagging his tail and blinking while the model is thinking, next to
+the version, the model and the mode in use. See [The banner](#the-banner).
 
 ## Features
 
@@ -771,7 +766,7 @@ appears on an interactive terminal, and comes in three forms:
   while the model is thinking he wags his tail, blinks, and his goggles catch
   the light. It uses 256 colors, or 24-bit color when `COLORTERM` says the
   terminal has it.
-- **Compact**, the four-line mascot in the example at the top of this page. It is used
+- **Compact**, his head alone in four lines of block characters. It is used
   with `BANNER=compact`, with `NO_COLOR`, and whenever the terminal is too
   small for the pixel art.
 - **ASCII**, when the locale is not UTF-8, for example on the FreeBSD console
