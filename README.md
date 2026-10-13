@@ -1,5 +1,9 @@
 # BeastiePilot
 
+<p align="center">
+  <img src="docs/beastie.svg" width="224" height="272" alt="Beastie, the BSD daemon, in a pilot cap and goggles, holding the yoke of an airplane">
+</p>
+
 An AI-powered terminal assistant for FreeBSD. Describe what you want in plain
 language; BeastiePilot asks a local LLM for the matching shell command, shows it
 to you, and runs it only after you say yes.
@@ -7,7 +11,7 @@ to you, and runs it only after you say yes.
 ```console
 $ beastiepilot install nginx and enable it at boot
 
-  █▖ ▗▄▄▖ ▗█   BeastiePilot v0.1.0
+  █▖ ▗▄▄▖ ▗█   BeastiePilot v0.3.3
   ▝█▟████▙█▘   llama3.2 · localhost:11434
    ██▀██▀██    ~/projects/web
    ▀██▀▀██▀    safe mode
@@ -19,9 +23,9 @@ $ beastiepilot install nginx and enable it at boot
   ? Execute this command? [y/N]
 ```
 
-On a roomy color terminal the mascot above is replaced by a pixel-art Beastie
-at the yoke of an airplane, who wags his tail and blinks while the model is
-thinking; see [The banner](#the-banner).
+On a roomy color terminal that mascot is replaced by the pixel-art Beastie at
+the top of this page, at the yoke of an airplane, who wags his tail and blinks
+while the model is thinking; see [The banner](#the-banner).
 
 ## Features
 
@@ -761,12 +765,13 @@ The banner shows Beastie in his pilot cap and goggles next to the version, the
 model and Ollama host in use, the working directory and the mode. It only
 appears on an interactive terminal, and comes in three forms:
 
-- **Pixel art**, used with `BANNER=full` when the locale is UTF-8, colors are
-  enabled and the terminal has room for it (17 lines tall). Beastie holds the
-  yoke of an airplane with both hands, and while the model is thinking he wags
-  his tail, blinks, and his goggles catch the light. It uses 256 colors, or
-  24-bit color when `COLORTERM` says the terminal has it.
-- **Compact**, the four-line mascot shown at the top of this page. It is used
+- **Pixel art**, the Beastie at the top of this page, used with `BANNER=full`
+  when the locale is UTF-8, colors are enabled and the terminal has room for
+  it (17 lines tall). He holds the yoke of an airplane with both hands, and
+  while the model is thinking he wags his tail, blinks, and his goggles catch
+  the light. It uses 256 colors, or 24-bit color when `COLORTERM` says the
+  terminal has it.
+- **Compact**, the four-line mascot in the example at the top of this page. It is used
   with `BANNER=compact`, with `NO_COLOR`, and whenever the terminal is too
   small for the pixel art.
 - **ASCII**, when the locale is not UTF-8, for example on the FreeBSD console
@@ -875,6 +880,14 @@ files, building, updating and searching it), the setup and the banner's
 rendering. They use a stand-in for the embedding model, so they say nothing
 about how well a real one retrieves, and a stand-in for the machine, so the
 setup's commands are checked for what they are, not run.
+
+The picture of Beastie at the top of this page is drawn from the sprite in
+`banner.go`, and a test fails when the two differ. After changing the sprite,
+draw it again:
+
+```sh
+BEASTIEPILOT_DRAW=1 go test -run TestSpritePicture
+```
 
 ## License
 

@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,5 +195,156 @@ func TestChooseBannerWithoutATerminal(t *testing.T) {
 	t.Setenv("LC_ALL", "C")
 	if art := chooseBanner(ui, defaultSettings(), 30); len(art.lines) != len(beastieASCII.rows) {
 		t.Errorf("chose a banner of %d lines in the C locale, want the ASCII mascot", len(art.lines))
+	}
+}
+
+// The picture of Beastie that the README shows, and how many pixels of the
+// page one pixel of the sprite takes there.
+const (
+	picturePath  = "docs/beastie.svg"
+	pictureScale = 8
+)
+
+// spritePicture draws that picture: the sprite as the banner animates it, as
+// an SVG image. What never changes is drawn once. A pixel that comes and goes
+// is drawn in a layer with the others that are there at the same ticks, and a
+// style sheet shows and hides each layer as the ticks go by.
+func spritePicture() string {
+	// The tail goes there and back in 8 ticks, a blink comes every 28 and a
+	// glint every 40, so every 280 it all starts again.
+	const round = 280
+	frames := make([][]string, round)
+	for tick := range frames {
+		frames[tick] = spriteFrame(tick)
+	}
+
+	// Where each letter is: for good, or at the ticks marked in when.
+	type layer struct {
+		when   string
+		pixels [][]byte
+	}
+	blank := func() [][]byte {
+		rows := make([][]byte, len(beastieSprite))
+		for y := range rows {
+			rows[y] = bytes.Repeat([]byte{'.'}, len(beastieSprite[y]))
+		}
+		return rows
+	}
+	still, layers := blank(), []*layer{}
+	for y, row := range beastieSprite {
+		for x := range row {
+			seen := ""
+			for tick := range frames {
+				if c := frames[tick][y][x]; c != '.' && !strings.Contains(seen, string(c)) {
+					seen += string(c)
+				}
+			}
+			for _, c := range []byte(seen) {
+				when := make([]byte, round)
+				for tick := range frames {
+					when[tick] = '0'
+					if frames[tick][y][x] == c {
+						when[tick] = '1'
+					}
+				}
+				if !strings.Contains(string(when), "0") {
+					still[y][x] = c
+					continue
+				}
+				var in *layer
+				for _, l := range layers {
+					if l.when == string(when) {
+						in = l
+					}
+				}
+				if in == nil {
+					in = &layer{string(when), blank()}
+					layers = append(layers, in)
+				}
+				in.pixels[y][x] = c
+			}
+		}
+	}
+
+	// paths draws pixels, each color as one path made of the runs of it.
+	letters := "bdgkmnprswy"
+	paths := func(pixels [][]byte) string {
+		var b strings.Builder
+		for _, c := range []byte(letters) {
+			var d strings.Builder
+			for y, row := range pixels {
+				for x := 0; x < len(row); x++ {
+					if row[x] != c {
+						continue
+					}
+					n := 1
+					for x+n < len(row) && row[x+n] == c {
+						n++
+					}
+					fmt.Fprintf(&d, "M%d %dh%dv1h-%dz", x, y, n, n)
+					x += n - 1
+				}
+			}
+			if d.Len() > 0 {
+				color := spriteColors[c]
+				fmt.Fprintf(&b, "<path fill=\"#%02x%02x%02x\" d=\"%s\"/>\n", color.r, color.g, color.b, d.String())
+			}
+		}
+		return b.String()
+	}
+	number := func(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
+
+	var style, drawn strings.Builder
+	for i, l := range layers {
+		// The layer comes round sooner than the whole does.
+		period := round
+		for p := 1; p < round; p++ {
+			if round%p == 0 && strings.Repeat(l.when[:p], round/p) == l.when {
+				period = p
+				break
+			}
+		}
+		fmt.Fprintf(&style, ".l%d{opacity:%c;animation:l%d %ss step-end infinite}\n@keyframes l%d{", i, l.when[0], i,
+			number(float64(period)*frameInterval.Seconds()), i)
+		for tick := 0; tick < period; tick++ {
+			if tick == 0 || l.when[tick] != l.when[tick-1] {
+				fmt.Fprintf(&style, "%s%%{opacity:%c}", number(float64(tick*1000000/period)/10000), l.when[tick])
+			}
+		}
+		style.WriteString("}\n")
+		fmt.Fprintf(&drawn, "<g class=\"l%d\">\n%s</g>\n", i, paths(l.pixels))
+	}
+
+	const about = "Beastie, the BSD daemon, in a pilot cap and goggles, holding the yoke of an airplane"
+	width, height := len(beastieSprite[0]), len(beastieSprite)
+	return fmt.Sprintf("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 %d %d\" width=\"%d\" height=\"%d\" shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"%s\">\n"+
+		"<title>%s</title>\n<style>\n%s@media (prefers-reduced-motion:reduce){g{animation:none}}\n</style>\n%s%s</svg>\n",
+		width, height, width*pictureScale, height*pictureScale, about, about, style.String(), paths(still), drawn.String())
+}
+
+// TestSpritePicture holds the picture in the README to the sprite that the
+// banner draws. After changing the sprite, draw the picture again with
+//
+//	BEASTIEPILOT_DRAW=1 go test -run TestSpritePicture
+func TestSpritePicture(t *testing.T) {
+	want := spritePicture()
+	if os.Getenv("BEASTIEPILOT_DRAW") != "" {
+		if err := os.MkdirAll(filepath.Dir(picturePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(picturePath, []byte(want), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.ReadFile(picturePath)
+	if err != nil || string(got) != want {
+		t.Errorf("%s is not the sprite as it is now (%v); draw it again with: BEASTIEPILOT_DRAW=1 go test -run TestSpritePicture", picturePath, err)
+	}
+
+	// Every color of the sprite has to be one that the picture knows.
+	for letter := range spriteColors {
+		if !strings.Contains("bdgkmnprswy", string(letter)) {
+			t.Errorf("the picture does not draw the color %q", letter)
+		}
 	}
 }
