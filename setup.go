@@ -42,9 +42,17 @@ const (
 	// startPatience is how long Ollama is given to answer after being started.
 	startPatience = 30 * time.Second
 
+	// startSettle is how long a service that was just started is left alone
+	// before asking whether it is still running.
+	startSettle = 2 * time.Second
+
 	// serviceLogLines is how much of the Ollama service's log is shown when
 	// the server does not come up.
 	serviceLogLines = 10
+
+	// ollamaHome is the home directory offered to FreeBSD's Ollama service
+	// when it has none. The service keeps the models beneath it already.
+	ollamaHome = "/var/lib/ollama"
 
 	// probeTimeout is how long a question to Ollama about its state may take.
 	probeTimeout = 5 * time.Second
@@ -159,6 +167,7 @@ type setup struct {
 	saved    settings      // the settings as the files and the environment give them
 	file     string        // the configuration file that changes are saved to, or ""
 	patience time.Duration // how long to wait for Ollama to start
+	settle   time.Duration // how long before asking whether its service stopped
 
 	modelOK   bool // the model that writes commands is downloaded
 	embedOK   bool // so is the one that indexes text
@@ -169,7 +178,7 @@ type setup struct {
 // before the command line changed them into cfg, and file is where the
 // difference may be saved.
 func newSetup(ui styler, in io.Reader, cfg, saved settings, file string, m machine) *setup {
-	return &setup{ui: ui, in: in, m: m, cfg: cfg, saved: saved, file: file, patience: startPatience}
+	return &setup{ui: ui, in: in, m: m, cfg: cfg, saved: saved, file: file, patience: startPatience, settle: startSettle}
 }
 
 // run performs the setup and returns the exit code: zero once BeastiePilot is
@@ -217,6 +226,13 @@ func (s *setup) item(code, mark, format string, args ...any) {
 		} else {
 			fmt.Fprintf(s.ui.out, "      %s\n", line)
 		}
+	}
+}
+
+// note continues the item above it with another paragraph.
+func (s *setup) note(format string, args ...any) {
+	for _, line := range wrap(fmt.Sprintf(format, args...), 70) {
+		fmt.Fprintf(s.ui.out, "      %s\n", line)
 	}
 }
 
@@ -308,38 +324,95 @@ func (s *setup) ollama() error {
 		return halt(exitError)
 	}
 
-	chain, question := "sysrc ollama_enable=YES && service ollama start", "Start Ollama, now and at every boot?"
+	const start = "sysrc ollama_enable=YES && service ollama start"
+	chain, question, housed := start, "Start Ollama, now and at every boot?", false
 	if installed {
 		s.warn("Ollama is installed but does not answer at %s.", where)
+		// It may have been started before and have stopped for want of a home.
+		if home := s.homeless(); home != "" {
+			chain, question, housed = home+" && "+start, "Give it that home and start Ollama, now and at every boot?", true
+		}
 	} else {
 		s.warn("Ollama, the program that runs the models, is not installed.")
-		chain, question = s.install("misc/ollama", "ollama")+" && "+chain, "Install Ollama and start it, now and at every boot?"
+		chain, question = s.install("misc/ollama", "ollama")+" && "+start, "Install Ollama and start it, now and at every boot?"
 	}
-	ok, err := s.offer(question, chain)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return halt(exitError)
-	}
-
-	if s.ui.tty {
-		fmt.Fprint(s.ui.out, s.ui.paint(dim, "      Waiting for Ollama to answer ..."))
-	}
-	deadline := time.Now().Add(s.patience)
-	for version, err = s.probe(); err != nil && time.Now().Before(deadline); version, err = s.probe() {
-		time.Sleep(500 * time.Millisecond)
-	}
-	if s.ui.tty {
-		fmt.Fprint(s.ui.out, "\r\033[K")
-	}
-	if err != nil {
+	for {
+		ok, err := s.offer(question, chain)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return halt(exitError)
+		}
+		if version, err = s.await(); err == nil {
+			break
+		}
 		s.warn("Ollama was started but does not answer at %s (%v).", where, err)
-		s.serviceLog()
-		return halt(exitError)
+		home := ""
+		if !housed {
+			home = s.homeless()
+		}
+		if home == "" {
+			s.serviceLog()
+			return halt(exitError)
+		}
+		chain, question, housed = home+" && service ollama start", "Give it that home and start Ollama again?", true
 	}
 	s.done("Running at %s (version %s).", where, version)
 	return nil
+}
+
+// await gives Ollama time to answer after its service was started, and
+// returns its version. It stops waiting once the service is seen to have
+// stopped again.
+func (s *setup) await() (version string, err error) {
+	if s.ui.tty {
+		fmt.Fprint(s.ui.out, s.ui.paint(dim, "      Waiting for Ollama to answer ..."))
+		defer fmt.Fprint(s.ui.out, "\r\033[K")
+	}
+	started, pause := time.Now(), min(500*time.Millisecond, s.patience/4)
+	for version, err = s.probe(); err != nil && time.Since(started) < s.patience; version, err = s.probe() {
+		time.Sleep(pause)
+		if time.Since(started) < s.settle {
+			continue
+		}
+		if out, statusErr := s.m.output("service", "ollama", "status"); statusErr != nil && strings.Contains(out, "is not running") {
+			return s.probe()
+		}
+	}
+	return version, err
+}
+
+// homeless looks in the service's log for the way FreeBSD's Ollama service
+// fails as packaged: it runs Ollama as nobody and sets no HOME for that user,
+// so Ollama looks for its key under /, cannot create the directory and stops.
+// When the log ends that way, homeless says so and returns the commands that
+// give the service a home, through the ollama_env setting of rc.conf. It
+// returns "" when that is not what happened, or when ollama_env is in use
+// already.
+func (s *setup) homeless() string {
+	path := s.serviceLogPath()
+	lines, err := lastLines(path, serviceLogLines)
+	if err != nil {
+		return ""
+	}
+	failure := ""
+	for _, line := range lines {
+		if strings.Contains(line, "could not create directory") && strings.Contains(line, "/.ollama") {
+			failure = line
+		}
+	}
+	user, err := s.m.output("sysrc", "-n", "ollama_user")
+	if err != nil || user == "" {
+		user = "nobody"
+	}
+	if env, err := s.m.output("sysrc", "-n", "ollama_env"); failure == "" || !plainWord(user) || (err == nil && env != "") {
+		return ""
+	}
+	s.note("Its log, %s, says why it stopped:", path)
+	fmt.Fprintf(s.ui.out, "\n        %s\n\n", s.ui.paint(dim, failure))
+	s.note("The service runs Ollama as %s, with no home directory of its own, and Ollama needs one to keep its key in. %s will do.", user, ollamaHome)
+	return "mkdir -p " + ollamaHome + " && chown " + user + " " + ollamaHome + " && sysrc ollama_env=HOME=" + ollamaHome
 }
 
 // serviceLogPath returns where FreeBSD's Ollama service keeps its log: what
@@ -360,23 +433,18 @@ func (s *setup) serviceLogPath() string {
 // where a server that stopped right after it was started says why.
 func (s *setup) serviceLog() {
 	path := s.serviceLogPath()
-	say := func(format string, args ...any) {
-		for _, line := range wrap(fmt.Sprintf(format, args...), 70) {
-			fmt.Fprintf(s.ui.out, "      %s\n", line)
-		}
-	}
 	lines, err := lastLines(path, serviceLogLines)
 	switch {
 	case errors.Is(err, fs.ErrPermission) && plainWord(path):
 		_, shown := s.m.rootCommand("tail -n 20 " + path)
-		say("Its log should say why, and reading it needs root:")
+		s.note("Its log should say why, and reading it needs root:")
 		fmt.Fprintf(s.ui.out, "\n        %s\n", s.ui.paint(boldGreen, shown))
 	case errors.Is(err, fs.ErrPermission):
-		say("Its log should say why, and reading it needs root: %s", path)
+		s.note("Its log should say why, and reading it needs root: %s", path)
 	case len(lines) == 0:
-		say("Its log, %s, says nothing about it.", path)
+		s.note("Its log, %s, says nothing about it.", path)
 	default:
-		say("Its log, %s, ends with:", path)
+		s.note("Its log, %s, ends with:", path)
 		fmt.Fprintln(s.ui.out)
 		for _, line := range lines {
 			fmt.Fprintf(s.ui.out, "        %s\n", s.ui.paint(dim, line))

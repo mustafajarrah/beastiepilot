@@ -38,6 +38,8 @@ type fakeHost struct {
 	ran      []string          // the commands run, as their arguments joined by spaces
 	failing  string            // a command containing this fails
 	dead     bool              // the Ollama service starts and stops right away
+	homeless bool              // it stops for want of a home, until given one
+	log      string            // where the service writes its log
 }
 
 // newFakeHost returns a FreeBSD 15.1 release on amd64 with nothing installed.
@@ -56,6 +58,8 @@ func newFakeHost(t *testing.T) *fakeHost {
 			"uname -p":           "amd64",
 		},
 	}
+	h.log = filepath.Join(dir, "var", "log", "ollama-nobody.log")
+	h.outputs["sysrc -n ollama_log"] = h.log
 	h.srv = httptest.NewServer(http.HandlerFunc(h.serve))
 	t.Cleanup(h.srv.Close)
 	return h
@@ -176,8 +180,16 @@ func (h *fakeHost) machine(goos string, root bool) machine {
 			if strings.Contains(line, "pkg install ollama") || strings.Contains(line, "ports/misc/ollama") {
 				h.programs["ollama"] = true
 			}
+			if strings.Contains(line, "ollama_env=HOME=") {
+				h.homeless = false
+				h.outputs["sysrc -n ollama_env"] = "HOME=/var/lib/ollama"
+			}
 			if strings.Contains(line, "service ollama start") {
-				h.running = !h.dead
+				h.running = !h.dead && !h.homeless
+				if h.homeless {
+					h.write(h.log, "Couldn't find '/.ollama/id_ed25519'. Generating new private key.\n"+
+						"Error: could not create directory mkdir /.ollama: permission denied\n")
+				}
 			}
 			if strings.Contains(line, "src.txz") || strings.Contains(line, "FreeBSD-set-src") {
 				h.write(filepath.Join(h.src, "sbin", "zfs", "zfs.8"), zfsPage)
@@ -197,8 +209,15 @@ func (h *fakeHost) machine(goos string, root bool) machine {
 		output: func(argv ...string) (string, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			if out, ok := h.outputs[strings.Join(argv, " ")]; ok {
+			line := strings.Join(argv, " ")
+			if out, ok := h.outputs[line]; ok {
 				return out, nil
+			}
+			if line == "service ollama status" && h.programs["ollama"] {
+				if h.running {
+					return "ollama is running as pid 100.", nil
+				}
+				return "ollama is not running.", errors.New("exit status 1")
 			}
 			return "", errors.New("exit status 1")
 		},
@@ -226,10 +245,7 @@ func (h *fakeHost) configure(m machine, cfg, saved settings, file, answers strin
 		lines += string(a) + "\n"
 	}
 	s := newSetup(styler{out: &out}, strings.NewReader(lines), cfg, saved, file, m)
-	s.patience = 2 * time.Second
-	if h.dead {
-		s.patience = 100 * time.Millisecond // it is not coming
-	}
+	s.patience, s.settle = 2*time.Second, 0
 	code := s.run()
 	return code, out.String()
 }
@@ -428,6 +444,7 @@ func TestConfigureDeclined(t *testing.T) {
 
 func TestServiceLogPath(t *testing.T) {
 	h := newFakeHost(t)
+	delete(h.outputs, "sysrc -n ollama_log")
 	s := newSetup(styler{out: io.Discard}, strings.NewReader(""), h.settings(), h.settings(), "", h.machine("freebsd", false))
 	if got, want := s.serviceLogPath(), "/var/log/ollama-nobody.log"; got != want {
 		t.Errorf("with nothing in rc.conf: %q, want %q", got, want)
@@ -561,10 +578,9 @@ func TestConfigureVariants(t *testing.T) {
 		h := ready(t)
 		h.set(func() { h.running, h.dead = false, true })
 		h.programs["ollama"] = true
-		log := filepath.Join(t.TempDir(), "ollama.log")
-		h.outputs["sysrc -n ollama_log"] = log
+		log := h.log
 		h.write(log, "time=2026-10-12T21:16:55 level=INFO msg=starting\n\n"+
-			"Error: could not create directory \x1b[31mmkdir /.ollama\x1b[0m: permission denied\n")
+			"Error: listen tcp 127.0.0.1:11434: \x1b[31mbind\x1b[0m: address already in use\n")
 		cfg := h.settings()
 		code, out := h.configure(h.machine("freebsd", false), cfg, cfg, filepath.Join(t.TempDir(), "config"), "y")
 		if code != exitError || isConfigured() {
@@ -573,7 +589,7 @@ func TestConfigureVariants(t *testing.T) {
 		for _, want := range []string{
 			"Ollama was started but does not answer at " + h.srv.URL,
 			"Its log, " + log + ", ends with: time=2026-10-12T21:16:55 level=INFO msg=starting " +
-				"Error: could not create directory [31mmkdir /.ollama[0m: permission denied",
+				"Error: listen tcp 127.0.0.1:11434: [31mbind[0m: address already in use",
 			"BeastiePilot is not ready yet.",
 		} {
 			if !says(out, want) {
@@ -600,6 +616,72 @@ func TestConfigureVariants(t *testing.T) {
 		_, out = h.configure(h.machine("freebsd", false), cfg, cfg, filepath.Join(t.TempDir(), "config"), "y")
 		if !says(out, "says nothing about it.") {
 			t.Errorf("output does not say that the log is empty\n%s", out)
+		}
+	})
+
+	t.Run("a service without a home", func(t *testing.T) {
+		const (
+			install = "su root -c pkg install ollama && sysrc ollama_enable=YES && service ollama start"
+			home    = "mkdir -p /var/lib/ollama && chown nobody /var/lib/ollama && sysrc ollama_env=HOME=/var/lib/ollama"
+			why     = "says why it stopped: Error: could not create directory mkdir /.ollama: permission denied " +
+				"The service runs Ollama as nobody, with no home directory of its own"
+		)
+		// homeless returns a host whose Ollama service stops when started.
+		homeless := func(t *testing.T) (*fakeHost, settings) {
+			h := ready(t)
+			h.set(func() { h.running, h.homeless = false, true })
+			return h, h.settings()
+		}
+		file := func(t *testing.T) string { return filepath.Join(t.TempDir(), "config") }
+
+		// Newly installed: it is started, stops, and the log says why. Then
+		// reference material and configuration file: no.
+		h, cfg := homeless(t)
+		code, out := h.configure(h.machine("freebsd", false), cfg, cfg, file(t), "yynn")
+		want := []string{install, "su root -c " + home + " && service ollama start"}
+		if code != exitOK || !reflect.DeepEqual(h.ran, want) {
+			t.Errorf("exit code %d, ran\n  %s\nwant 0 and\n  %s\n%s", code, strings.Join(h.ran, "\n  "), strings.Join(want, "\n  "), out)
+		}
+		for _, want := range []string{"Ollama was started but does not answer", why, "Give it that home and start Ollama again?", "Running at " + h.srv.URL} {
+			if !says(out, want) {
+				t.Errorf("output lacks %q\n%s", want, out)
+			}
+		}
+		if says(out, "ends with:") {
+			t.Errorf("the log was shown a second time\n%s", out)
+		}
+
+		// Installed and started before, as its log tells: one question.
+		h, cfg = homeless(t)
+		h.programs["ollama"] = true
+		h.write(h.log, "Error: could not create directory mkdir /.ollama: permission denied\n")
+		code, out = h.configure(h.machine("freebsd", false), cfg, cfg, file(t), "ynn")
+		want = []string{"su root -c " + home + " && sysrc ollama_enable=YES && service ollama start"}
+		if code != exitOK || !reflect.DeepEqual(h.ran, want) || !says(out, why) {
+			t.Errorf("exit code %d, ran %q; want 0, %q and the reason\n%s", code, h.ran, want, out)
+		}
+
+		// Declined: nothing more is tried.
+		h, cfg = homeless(t)
+		code, out = h.configure(h.machine("freebsd", false), cfg, cfg, file(t), "yn")
+		if want := []string{install}; code != exitError || !reflect.DeepEqual(h.ran, want) || !says(out, "not ready yet") {
+			t.Errorf("exit code %d, ran %q; want 1 and %q\n%s", code, h.ran, want, out)
+		}
+
+		// ollama_env is taken: the log is shown and that is all.
+		h, cfg = homeless(t)
+		h.outputs["sysrc -n ollama_env"] = "OLLAMA_HOST=0.0.0.0"
+		code, out = h.configure(h.machine("freebsd", false), cfg, cfg, file(t), "yy")
+		if want := []string{install}; code != exitError || !reflect.DeepEqual(h.ran, want) || !says(out, "ends with:") || says(out, "Give it that home") {
+			t.Errorf("exit code %d, ran %q; want 1, %q and the log\n%s", code, h.ran, want, out)
+		}
+
+		// Another user runs the service: the home goes to that user.
+		h, cfg = homeless(t)
+		h.outputs["sysrc -n ollama_user"] = "llm"
+		h.configure(h.machine("freebsd", false), cfg, cfg, file(t), "yynn")
+		if got, want := h.ran[len(h.ran)-1], "su root -c mkdir -p /var/lib/ollama && chown llm /var/lib/ollama && sysrc ollama_env=HOME=/var/lib/ollama && service ollama start"; got != want {
+			t.Errorf("ran %q, want %q", got, want)
 		}
 	})
 

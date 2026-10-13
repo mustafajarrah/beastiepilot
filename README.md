@@ -33,6 +33,9 @@ who wags his tail and blinks while the model is thinking; see
   instance. Nothing leaves the machine unless you point it elsewhere.
 - **Human in the loop.** Every suggestion is displayed in full and needs an
   explicit answer typed at the terminal; the default answer is *no*.
+- **A session when you want one.** Run `beastiepilot` by itself and it takes
+  requests one after another, with a line editor, the earlier requests within
+  reach of the arrow keys, and each request able to build on the last.
 - **Two modes.** `safe` shows the command and asks; `guided` also explains what
   each part of it does and why. See [Modes](#modes).
 - **You choose what needs no question.** List the commands you consider
@@ -132,7 +135,11 @@ Things worth knowing about it:
 - **When Ollama does not come up** after being started, `configure` shows the
   last lines of the service's log (`/var/log/ollama-nobody.log` unless
   `rc.conf` says otherwise), or the command that shows them when reading the
-  log needs root.
+  log needs root. One cause it recognizes and offers to fix: the packaged
+  service runs Ollama as `nobody`, with no home directory to keep its key in,
+  and Ollama stops with `could not create directory mkdir /.ollama`.
+  `configure` then offers to give the service `/var/lib/ollama` as its home,
+  through `ollama_env` in `rc.conf`, and to start it again.
 - **Some steps are optional.** Only Ollama and the model are needed. Say no to
   the reference material and BeastiePilot answers from the model alone.
 
@@ -162,6 +169,16 @@ service ollama start
 
 # Download a model (BeastiePilot defaults to llama3.2)
 ollama pull llama3.2
+```
+
+If the service stops right away and `/var/log/ollama-nobody.log` ends with
+`could not create directory mkdir /.ollama: permission denied`, it has no home
+directory to keep its key in. Give it one and start it again:
+
+```sh
+mkdir -p /var/lib/ollama && chown nobody /var/lib/ollama
+sysrc ollama_env=HOME=/var/lib/ollama
+service ollama start
 ```
 
 If you would rather not run it as a service, start the server in a spare
@@ -217,6 +234,7 @@ go build -ldflags "-X main.version=v0.1.0" -o beastiepilot .
 
 ```
 beastiepilot [flags] <what you want to do>
+beastiepilot [flags]
 beastiepilot [flags] configure
 beastiepilot [flags] -index
 ```
@@ -238,6 +256,55 @@ once with BeastiePilot ready, any other request ends with
 ```
 beastiepilot: not set up yet: run "beastiepilot configure" first; nothing was sent to the model
 ```
+
+### The session
+
+With no request, BeastiePilot opens a session on the terminal and takes
+requests one after another:
+
+```console
+$ beastiepilot
+
+  Say what you want to do, in plain language. The command is shown first
+  and runs only once you agree.
+
+  ──────────────────────────────────────────────────────────────────────
+  > show the free disk space
+  ──────────────────────────────────────────────────────────────────────
+  /help for commands · Ctrl-D to leave
+```
+
+Each request is handled as it would be from the command line: the command is
+shown, explained in `guided` mode, and run once you agree. Then the box comes
+back for the next one.
+
+- **Requests build on each other.** The last five requests go to the model
+  with each new one, together with the command it gave and what came of it, so
+  that `the same for /var` or `now only the snapshots` mean something. The
+  output of the commands is not sent. `/clear` forgets them.
+- **Editing.** Left, Right, Home, End, Backspace and Delete, and the Emacs
+  keys a shell has (Ctrl-A, Ctrl-E, Ctrl-U, Ctrl-K, Ctrl-W). Up and Down bring
+  back the earlier requests of the session. A line longer than the terminal
+  scrolls sideways.
+- **Ctrl-C stops what is going on**, not the session: it clears the line,
+  abandons a request the model has not answered, means no at the question, and
+  interrupts a command that is running. On an empty line, pressing it twice
+  leaves.
+- **Leaving.** Ctrl-D on an empty line, `/exit`, `exit` or `quit`.
+
+| Command   | What it does                                            |
+| --------- | ------------------------------------------------------- |
+| `/guided` | Explain each command before asking, from now on         |
+| `/safe`   | Show each command and ask, without the explanation      |
+| `/clear`  | Clear the screen and forget the earlier requests        |
+| `/help`   | List these commands                                     |
+| `/exit`   | Leave                                                   |
+
+A command is a single word that starts with a slash, so a request such as
+`/var is full, what takes the space?` is still a request. Flags apply to the
+whole session: `beastiepilot -type guided -model qwen2.5-coder`. The session
+needs a terminal; on one that cannot be read key by key (`TERM=dumb`) it falls
+back to a plain prompt without the box and the arrow keys.
 
 ### Examples
 
@@ -386,7 +453,7 @@ there, as before.
 | Code  | Meaning                                                                                              |
 | ----- | ---------------------------------------------------------------------------------------------------- |
 | *n*   | The exit status of the command, when it ran                                                          |
-| `0`   | You declined; nothing was executed                                                                   |
+| `0`   | You declined; nothing was executed. A session ends with `0` too                                      |
 | `1`   | BeastiePilot failed, the setup was not done, the model had no suggestion, or there was no terminal   |
 | `2`   | Invalid usage or configuration                                                                       |
 | `130` | Interrupted while waiting for the model, or while indexing                                           |
@@ -596,6 +663,9 @@ prompt only steers the model; the protections below are enforced in code.
   executed.
 - **Only an explicit answer counts.** `y` or `yes` followed by Enter approves;
   anything else, including an empty line, declines.
+- **Only an answer to the question counts.** Whatever was typed or pasted
+  before the question appeared is discarded, so a `y` typed ahead, or the
+  second line of a paste, cannot approve a command you have not seen.
 - **Destructive-looking commands need the word `yes`.** Recursive deletes,
   ZFS and partition destruction, raw writes to devices, overwriting files under
   `/etc`, shutting down, disabling the firewall and piping into a shell are
@@ -628,7 +698,9 @@ prompt only steers the model; the protections below are enforced in code.
 Your request, the system prompt, and a few facts about the host: the output of
 `uname -sr`, the CPU architecture, whether you are root, and the current
 working directory. In `guided` mode a second request carries your request and
-the suggested command.
+the suggested command. In a [session](#the-session), up to five earlier
+requests go along as well, each with the command suggested for it and whether
+it ran and with what exit status; the output of the commands does not.
 
 With an index, the request is also sent to the embedding model, and up to three
 excerpts of the indexed files travel with it to the model that writes the

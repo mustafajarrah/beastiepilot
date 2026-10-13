@@ -4,6 +4,7 @@
 // the shell command the model suggests, and runs it through /bin/sh once the
 // user explicitly confirms on the terminal. The TYPE setting can add an
 // explanation, and AUTO_RUN can name commands that need no confirmation.
+// Started without a request, it takes them one after another in a session.
 package main
 
 import (
@@ -207,11 +208,13 @@ func run() int {
 	}
 
 	intent := strings.TrimSpace(strings.Join(flag.Args(), " "))
-	if (intent == "") != *buildIdx {
-		// A request and -index exclude each other, and one of them is needed.
+	if intent != "" && *buildIdx {
+		// A request and -index exclude each other.
 		usage()
 		return exitUsage
 	}
+	// With neither, requests are taken one after another, on the terminal.
+	interactive := intent == "" && !*buildIdx
 	// The one request that is not for the model: the first-time setup.
 	configure := intent == "configure"
 
@@ -227,6 +230,10 @@ func run() int {
 	}
 	ui := newStyler(tty)
 
+	if interactive && tty == nil {
+		usage()
+		return exitUsage
+	}
 	if mistypedConfigure(intent) {
 		ui.errorf("%q looks like a mistyped \"configure\" and was not sent to the model; to set this machine up, run \"beastiepilot configure\"", intent)
 		return exitUsage
@@ -285,37 +292,71 @@ func run() int {
 		return newSetup(ui, tty, cfg, saved, file, thisMachine(tty)).run()
 	}
 
+	p := &pilot{ui: ui, cfg: cfg, configFiles: configFiles}
+	if tty != nil {
+		p.tty, p.in = tty, tty
+	}
+	if interactive {
+		return p.session()
+	}
+	p.animate = art.animated
+	return p.answer(intent)
+}
+
+// pilot answers requests. It holds what stays the same from one request to
+// the next.
+type pilot struct {
+	ui          styler
+	tty         *os.File  // the controlling terminal, or nil without one
+	in          io.Reader // where approval is read from: the terminal, or nil
+	cfg         settings
+	configFiles []string
+	animate     bool       // the banner is right above, to animate while waiting
+	inSession   bool       // requests come one after another, on the terminal
+	past        []exchange // the earlier requests of the session
+}
+
+// answer takes one request through to the end: it asks the model for a
+// command, shows it and, once the user agrees, runs it. It returns the exit
+// code the request ends with.
+func (p *pilot) answer(intent string) int {
+	ui, cfg := p.ui, p.cfg
+
 	// With an index, look up the documentation closest to the request and
 	// let the model read it. Failing to is not fatal: the model can still
 	// answer from what it knows, and the user is told.
 	var excerpts []hit
 	var retrieveErr error
 	if _, statErr := os.Stat(indexPath()); statErr == nil {
-		_, retrieveErr = waiting(ui, cfg, art.animated, "Searching the reference material", func(ctx context.Context) (err error) {
+		_, retrieveErr = waiting(ui, cfg, p.animate, "Searching the reference material", func(ctx context.Context) (err error) {
 			excerpts, err = retrieve(ctx, cfg, intent)
 			return err
 		})
 		if errors.Is(retrieveErr, context.Canceled) {
-			return queryFailure(ui, cfg, retrieveErr)
+			return p.queryFailure(retrieveErr)
 		}
 	}
 
-	system := systemPrompt + cfg.promptPreferences() + hostContext() + referenceSection(excerpts)
-	reply, elapsed, err := ask(ui, cfg, art.animated, "Asking "+cfg.Model, system, intent)
+	system := systemPrompt + cfg.promptPreferences() + hostContext() + sessionSection(p.past) + referenceSection(excerpts)
+	reply, elapsed, err := ask(ui, cfg, p.animate, "Asking "+cfg.Model, system, intent)
 	if err != nil {
-		return queryFailure(ui, cfg, err)
+		return p.queryFailure(err)
 	}
 
 	command := cleanCommand(reply)
 	if cfg.Verbose {
-		printDetails(ui, cfg, configFiles, elapsed, reply, command, excerpts)
+		printDetails(ui, cfg, p.configFiles, elapsed, reply, command, excerpts)
 	}
 	if err := validateCommand(command); err != nil {
-		ui.errorf("%v", err)
+		p.fail("%v", err)
 		return exitError
 	}
 	if reason, ok := declined(command); ok {
-		fmt.Fprintf(ui.out, "\n  %s %s\n\n", ui.paint(boldYellow, "!"), reason)
+		fmt.Fprintf(ui.out, "\n  %s %s\n", ui.paint(boldYellow, "!"), reason)
+		if !p.inSession {
+			fmt.Fprintln(ui.out)
+		}
+		p.remember(intent, "", "you gave no command: "+reason)
 		return exitError
 	}
 
@@ -335,7 +376,7 @@ func run() int {
 		explanation := cleanExplanation(raw)
 		switch {
 		case errors.Is(err, context.Canceled):
-			return queryFailure(ui, cfg, err)
+			return p.queryFailure(err)
 		case err != nil || explanation == "":
 			// The command is still valid; the user decides without the commentary.
 			fmt.Fprintf(ui.out, "  %s %s\n\n", ui.paint(boldYellow, "!"), "The model gave no explanation for this command.")
@@ -362,12 +403,13 @@ func run() int {
 	switch {
 	case auto:
 		fmt.Fprintf(ui.out, "  %s %s\n\n", ui.paint(boldYellow, "!"), "Listed in AUTO_RUN: running without confirmation.")
-	case tty == nil:
-		ui.errorf("no terminal available to ask for confirmation; nothing was executed")
+	case p.in == nil:
+		p.fail("no terminal available to ask for confirmation; nothing was executed")
 		return exitError
 	default:
-		if !confirm(ui, tty, destructive) {
+		if !p.confirm(destructive) {
 			fmt.Fprintf(ui.out, "  %s\n", ui.paint(dim, "Aborted. Nothing was executed."))
+			p.remember(intent, command, "the user chose not to run it")
 			return exitOK
 		}
 		fmt.Fprintln(ui.out)
@@ -375,8 +417,13 @@ func run() int {
 
 	code, err := execute(command)
 	if err != nil {
-		ui.errorf("%v", err)
+		p.fail("%v", err)
+		p.remember(intent, command, "it could not be run")
 		return exitError
+	}
+	p.remember(intent, command, fmt.Sprintf("it ran and exited with status %d", code))
+	if p.inSession && code != exitOK {
+		fmt.Fprintf(ui.out, "\n  %s\n", ui.paint(dim, fmt.Sprintf("Exit status %d", code)))
 	}
 	return code
 }
@@ -418,18 +465,35 @@ func waiting(ui styler, cfg settings, animate bool, status string, request func(
 	return time.Since(start), err
 }
 
+// fail reports that a request could not be seen through: on stderr, where
+// scripts and logs expect it, or within the session when there is one.
+func (p *pilot) fail(format string, args ...any) {
+	if !p.inSession {
+		p.ui.errorf(format, args...)
+		return
+	}
+	fmt.Fprintln(p.ui.out)
+	for i, line := range wrap(fmt.Sprintf(format, args...), 70) {
+		mark := " "
+		if i == 0 {
+			mark = p.ui.paint(boldRed, "!")
+		}
+		fmt.Fprintf(p.ui.out, "  %s %s\n", mark, line)
+	}
+}
+
 // queryFailure reports why a request to the model failed and returns the exit
 // code to finish with.
-func queryFailure(ui styler, cfg settings, err error) int {
+func (p *pilot) queryFailure(err error) int {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		ui.errorf("no answer from %s within %s (raise TIMEOUT or pass -timeout)", cfg.Model, cfg.Timeout)
+		p.fail("no answer from %s within %s (raise TIMEOUT or pass -timeout)", p.cfg.Model, p.cfg.Timeout)
 		return exitError
 	case errors.Is(err, context.Canceled):
-		ui.errorf("interrupted")
+		p.fail("interrupted")
 		return exitInterrupted
 	default:
-		ui.errorf("%v", err)
+		p.fail("%v", err)
 		return exitError
 	}
 }
@@ -480,12 +544,17 @@ func editDistance(a, b string) int {
 func usage() {
 	out := flag.CommandLine.Output()
 	fmt.Fprint(out, `Usage: beastiepilot [flags] <what you want to do>
+       beastiepilot [flags]
        beastiepilot [flags] configure
        beastiepilot [flags] -index
 
 Translates a plain-language request into a FreeBSD shell command using a local
 Ollama model, then asks for confirmation before running it. With -type guided
 it also explains the command. Commands listed in AUTO_RUN run without asking.
+
+With no request it opens a session on the terminal and takes requests one
+after another, each building on the ones before. /help lists what else can be
+typed there; /exit or Ctrl-D leaves.
 
 The single word "configure" sets the machine up instead: it offers to install
 and start Ollama, download the models, install the FreeBSD source tree and
@@ -1022,23 +1091,32 @@ func printExplanation(ui styler, explanation string) {
 // destructive. An empty line, any other input, end of input or a read error
 // all mean no.
 func confirm(ui styler, in io.Reader, strict bool) bool {
-	if strict {
-		fmt.Fprintf(ui.out, "  %s %s %s ",
-			ui.paint(boldRed, "?"),
-			ui.paint(bold, `Type "yes" to execute it anyway`),
-			ui.paint(dim, "[yes/N]"))
-	} else {
-		fmt.Fprintf(ui.out, "  %s %s %s ",
-			ui.paint(boldYellow, "?"),
-			ui.paint(bold, "Execute this command?"),
-			ui.paint(dim, "[y/N]"))
-	}
-
+	fmt.Fprint(ui.out, question(ui, strict))
 	answer, err := readLine(in)
 	if err != nil {
 		fmt.Fprintln(ui.out) // the user never pressed Enter
 		return false
 	}
+	return consent(answer, strict)
+}
+
+// question returns the words that ask for approval, up to where the answer
+// is typed.
+func question(ui styler, strict bool) string {
+	if strict {
+		return fmt.Sprintf("  %s %s %s ",
+			ui.paint(boldRed, "?"),
+			ui.paint(bold, `Type "yes" to execute it anyway`),
+			ui.paint(dim, "[yes/N]"))
+	}
+	return fmt.Sprintf("  %s %s %s ",
+		ui.paint(boldYellow, "?"),
+		ui.paint(bold, "Execute this command?"),
+		ui.paint(dim, "[y/N]"))
+}
+
+// consent reports whether answer approves the command.
+func consent(answer string, strict bool) bool {
 	answer = strings.ToLower(strings.TrimSpace(answer))
 	return answer == "yes" || (answer == "y" && !strict)
 }
