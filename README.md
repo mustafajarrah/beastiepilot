@@ -57,13 +57,27 @@ who wags his tail and blinks while the model is thinking; see
 
 ## Quick start
 
-On FreeBSD, as the user who will use it:
+On FreeBSD:
 
 ```sh
-pkg install go                  # as root, to build
-go install github.com/mustafajarrah/beastiepilot@latest
-~/go/bin/beastiepilot configure
+# As root: Go to build with, then BeastiePilot itself, into /usr/local/bin
+pkg install go
+env GOBIN=/usr/local/bin go install github.com/mustafajarrah/beastiepilot@latest
+
+# As the user who will use it
+beastiepilot configure
 ```
+
+`/usr/local/bin` is where FreeBSD keeps programs from outside the base system,
+so every user's shell finds `beastiepilot` there by name. With `doas` or
+`sudo`, put it before each of the first two commands
+(`doas env GOBIN=/usr/local/bin go install ...`). To update, run the
+`go install` line again.
+
+If you would rather not build as root, a plain
+`go install github.com/mustafajarrah/beastiepilot@latest` puts the program in
+`~/go/bin`. Start it from there, as `~/go/bin/beastiepilot configure`, and the
+last step offers to copy it to `/usr/local/bin`.
 
 `configure` does the rest. It checks what the machine has and offers to
 provide what is missing, one step at a time:
@@ -78,7 +92,7 @@ provide what is missing, one step at a time:
 | Program            | Copy the program to `/usr/local/bin`, when the shell cannot find it by name                                      |
 
 ```console
-$ ~/go/bin/beastiepilot configure
+$ beastiepilot configure
 
   > Setting up BeastiePilot
     Each step says what it would do and asks first; nothing changes without
@@ -95,6 +109,11 @@ $ ~/go/bin/beastiepilot configure
 
 Things worth knowing about it:
 
+- **It comes first.** Until `configure` has finished once with BeastiePilot
+  ready, no request is sent to a model: the program says to run `configure`
+  and stops, and so does `-index`. When it finishes, it notes that in
+  `~/.local/state/beastiepilot/configured` (or under `$XDG_STATE_HOME`), the
+  only file it writes without a question. Each user runs it once.
 - **Nothing happens without a yes.** Every command is shown exactly as it will
   run before the question, and anything but `y` or `yes` skips the step. `pkg`
   is run without `-y`, so it lists what it would install and asks once more.
@@ -110,6 +129,10 @@ Things worth knowing about it:
   (`src.txz`, about 250 MB), or from the `FreeBSD-set-src` package when the
   base system was installed from packages. A system that is not a release,
   such as -CURRENT, is left for you to provide.
+- **When Ollama does not come up** after being started, `configure` shows the
+  last lines of the service's log (`/var/log/ollama-nobody.log` unless
+  `rc.conf` says otherwise), or the command that shows them when reading the
+  log needs root.
 - **Some steps are optional.** Only Ollama and the model are needed. Say no to
   the reference material and BeastiePilot answers from the model alone.
 
@@ -118,7 +141,10 @@ terminal.
 
 ## Manual installation
 
-Everything `configure` does can be done by hand.
+Everything `configure` installs can be installed by hand. Run
+`beastiepilot configure` once at the end all the same: requests are refused
+until it has found BeastiePilot ready. With everything already in place it
+runs nothing as root and has little left to ask.
 
 - FreeBSD (any supported release)
 - Go 1.21 or newer, to build: `pkg install go`
@@ -167,7 +193,8 @@ go install github.com/mustafajarrah/beastiepilot@latest
 ```
 
 The binary is placed in `$(go env GOPATH)/bin` (usually `~/go/bin`). Make sure
-that directory is on your `PATH`.
+that directory is on your `PATH`, or set `GOBIN` to have it placed elsewhere,
+as the [quick start](#quick-start) does.
 
 From source:
 
@@ -201,7 +228,16 @@ interpret, such as `?`, `*`, `'` or `|`.
 The single word `configure` is not sent to the model: it runs the
 [setup](#quick-start). A longer request that starts with it, such as
 `beastiepilot configure nginx to listen on port 8080`, is a request like any
-other.
+other. A single word that looks like a mistyped `configure`, such as
+`cofigure` or `config`, is not sent to the model either: BeastiePilot points
+to the right spelling and stops.
+
+Nothing is sent to a model before the setup: until `configure` has finished
+once with BeastiePilot ready, any other request ends with
+
+```
+beastiepilot: not set up yet: run "beastiepilot configure" first; nothing was sent to the model
+```
 
 ### Examples
 
@@ -347,13 +383,13 @@ there, as before.
 
 ### Exit status
 
-| Code  | Meaning                                                                    |
-| ----- | -------------------------------------------------------------------------- |
-| *n*   | The exit status of the command, when it ran                                |
-| `0`   | You declined; nothing was executed                                         |
-| `1`   | BeastiePilot failed, the model had no suggestion, or there was no terminal |
-| `2`   | Invalid usage or configuration                                             |
-| `130` | Interrupted while waiting for the model, or while indexing                 |
+| Code  | Meaning                                                                                              |
+| ----- | ---------------------------------------------------------------------------------------------------- |
+| *n*   | The exit status of the command, when it ran                                                          |
+| `0`   | You declined; nothing was executed                                                                   |
+| `1`   | BeastiePilot failed, the setup was not done, the model had no suggestion, or there was no terminal   |
+| `2`   | Invalid usage or configuration                                                                       |
+| `130` | Interrupted while waiting for the model, or while indexing                                           |
 
 ## Configuration
 
@@ -544,6 +580,9 @@ prompt only steers the model; the protections below are enforced in code.
 
 - **Read every command before approving it.** The confirmation prompt is the
   only thing standing between the model and your system.
+- **Nothing is sent to a model before the setup.** Until
+  `beastiepilot configure` has finished once for your user, a request goes
+  nowhere: the program points to `configure` and stops.
 - **Nothing runs unasked unless you listed it.** The only commands that skip
   the prompt are the ones in your own `AUTO_RUN` list, which is empty by
   default. The list is matched against every command on the line, and a line

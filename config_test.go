@@ -105,6 +105,7 @@ func isolate(t *testing.T) string {
 	t.Cleanup(func() { systemConfigPath = old })
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	t.Setenv("BEASTIEPILOT_CONFIG", "")
 	for _, key := range settingKeys {
 		t.Setenv("BEASTIEPILOT_"+key, "")

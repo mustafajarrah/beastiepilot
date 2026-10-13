@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,6 +37,7 @@ type fakeHost struct {
 	outputs  map[string]string // what commands print; any other command fails
 	ran      []string          // the commands run, as their arguments joined by spaces
 	failing  string            // a command containing this fails
+	dead     bool              // the Ollama service starts and stops right away
 }
 
 // newFakeHost returns a FreeBSD 15.1 release on amd64 with nothing installed.
@@ -175,7 +177,7 @@ func (h *fakeHost) machine(goos string, root bool) machine {
 				h.programs["ollama"] = true
 			}
 			if strings.Contains(line, "service ollama start") {
-				h.running = true
+				h.running = !h.dead
 			}
 			if strings.Contains(line, "src.txz") || strings.Contains(line, "FreeBSD-set-src") {
 				h.write(filepath.Join(h.src, "sbin", "zfs", "zfs.8"), zfsPage)
@@ -225,6 +227,9 @@ func (h *fakeHost) configure(m machine, cfg, saved settings, file, answers strin
 	}
 	s := newSetup(styler{out: &out}, strings.NewReader(lines), cfg, saved, file, m)
 	s.patience = 2 * time.Second
+	if h.dead {
+		s.patience = 100 * time.Millisecond // it is not coming
+	}
 	code := s.run()
 	return code, out.String()
 }
@@ -250,6 +255,9 @@ func TestConfigureFreshFreeBSD(t *testing.T) {
 	}
 	if got := questions(out); got != 9 {
 		t.Errorf("asked %d questions, want 9\n%s", got, out)
+	}
+	if !isConfigured() || !says(out, "Requests are accepted from now on: "+configuredPath()) {
+		t.Errorf("the setup finished without noting it, or without saying so\n%s", out)
 	}
 
 	wantRan := []string{
@@ -326,6 +334,9 @@ func TestConfigureFreshFreeBSD(t *testing.T) {
 			t.Errorf("second run: output lacks %q\n%s", want, out)
 		}
 	}
+	if says(out, "Requests are accepted from now on") {
+		t.Errorf("second run: announced again that requests are accepted\n%s", out)
+	}
 
 	// Once a source changes, the third run asks before reading it.
 	h.write(filepath.Join(cfg.DocsSource, "new.txt"), "A note about how the tape library is rotated every week.\n")
@@ -346,6 +357,9 @@ func TestConfigureDeclined(t *testing.T) {
 		}
 		if !says(out, "not ready yet") {
 			t.Errorf("output does not say it is not ready\n%s", out)
+		}
+		if isConfigured() {
+			t.Error("the setup was noted as done without Ollama")
 		}
 	})
 
@@ -369,6 +383,25 @@ func TestConfigureDeclined(t *testing.T) {
 		if !says(out, "> Not ready yet") {
 			t.Errorf("output does not say it is not ready\n%s", out)
 		}
+		if isConfigured() {
+			t.Error("the setup was noted as done without the model")
+		}
+	})
+
+	t.Run("nowhere to note it", func(t *testing.T) {
+		dir := isolate(t)
+		h := newFakeHost(t)
+		h.running = true
+		h.models[defaultModel] = true
+		h.programs["beastiepilot"] = true
+		cfg := h.settings()
+		// The state directory cannot be made: a file is in the way.
+		writeFile(t, filepath.Join(dir, "state"), "")
+		// Reference material and configuration file: no.
+		code, out := h.configure(h.machine("freebsd", false), cfg, cfg, filepath.Join(t.TempDir(), "config"), "nn")
+		if code != exitError || isConfigured() || !says(out, "> Not ready yet") || !says(out, "could not be noted down") {
+			t.Errorf("exit code %d, configured %v; want 1, false and the reason\n%s", code, isConfigured(), out)
+		}
 	})
 
 	t.Run("index", func(t *testing.T) {
@@ -391,6 +424,85 @@ func TestConfigureDeclined(t *testing.T) {
 			t.Errorf("the summary does not mention the missing index\n%s", out)
 		}
 	})
+}
+
+func TestServiceLogPath(t *testing.T) {
+	h := newFakeHost(t)
+	s := newSetup(styler{out: io.Discard}, strings.NewReader(""), h.settings(), h.settings(), "", h.machine("freebsd", false))
+	if got, want := s.serviceLogPath(), "/var/log/ollama-nobody.log"; got != want {
+		t.Errorf("with nothing in rc.conf: %q, want %q", got, want)
+	}
+	h.outputs["sysrc -n ollama_user"] = "ollama"
+	if got, want := s.serviceLogPath(), "/var/log/ollama-ollama.log"; got != want {
+		t.Errorf("with ollama_user: %q, want %q", got, want)
+	}
+	h.outputs["sysrc -n ollama_log"] = "/var/log/models.log"
+	if got, want := s.serviceLogPath(), "/var/log/models.log"; got != want {
+		t.Errorf("with ollama_log: %q, want %q", got, want)
+	}
+}
+
+func TestLastLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log")
+	var b strings.Builder
+	for i := 1; i <= 2000; i++ {
+		fmt.Fprintf(&b, "line %d of a log that is longer than what is read from its end\n\n", i)
+	}
+	b.WriteString("\ttabs\tand \x07bells\n" + strings.Repeat("x", 500) + "\n")
+	writeFile(t, path, b.String())
+
+	lines, err := lastLines(path, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"line 1999 of a log that is longer than what is read from its end",
+		"line 2000 of a log that is longer than what is read from its end",
+		"tabs and bells",
+		strings.Repeat("x", 160) + " ...",
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Errorf("lastLines = %q, want %q", lines, want)
+	}
+	// Cut off at a line boundary, far from the start of the file.
+	if lines, _ = lastLines(path, 5000); len(lines) < 100 || len(lines) > 400 || !strings.HasPrefix(lines[0], "line ") {
+		t.Errorf("reading the whole tail gave %d lines, the first %q", len(lines), lines[:1])
+	}
+	if _, err := lastLines(filepath.Join(t.TempDir(), "none"), 4); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing file gave %v", err)
+	}
+}
+
+func TestMarkConfigured(t *testing.T) {
+	dir := isolate(t)
+	want := filepath.Join(dir, "state", "beastiepilot", "configured")
+	if got := configuredPath(); got != want {
+		t.Fatalf("configuredPath() = %q, want %q", got, want)
+	}
+	if isConfigured() {
+		t.Fatal("configured before any setup")
+	}
+	if noted, err := markConfigured(); err != nil || !noted {
+		t.Fatalf("markConfigured() = %v, %v; want true, nil", noted, err)
+	}
+	if !isConfigured() {
+		t.Fatal("not configured after the setup was noted")
+	}
+	before, err := os.ReadFile(want)
+	if err != nil || !strings.Contains(string(before), "beastiepilot configure") {
+		t.Fatalf("the note reads %q, %v", before, err)
+	}
+	// Noting it again is not news and leaves the file alone.
+	if noted, err := markConfigured(); err != nil || noted {
+		t.Errorf("second markConfigured() = %v, %v; want false, nil", noted, err)
+	}
+
+	// Without XDG_STATE_HOME it is under the home directory.
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "/home/beastie")
+	if got, want := configuredPath(), "/home/beastie/.local/state/beastiepilot/configured"; got != want {
+		t.Errorf("configuredPath() = %q, want %q", got, want)
+	}
 }
 
 func TestConfigureVariants(t *testing.T) {
@@ -442,6 +554,52 @@ func TestConfigureVariants(t *testing.T) {
 		h.configure(h.machine("freebsd", false), cfg, cfg, filepath.Join(t.TempDir(), "config"), "ynn")
 		if want := []string{"su root -c sysrc ollama_enable=YES && service ollama start"}; !reflect.DeepEqual(h.ran, want) {
 			t.Errorf("ran %q, want %q", h.ran, want)
+		}
+	})
+
+	t.Run("started but not answering", func(t *testing.T) {
+		h := ready(t)
+		h.set(func() { h.running, h.dead = false, true })
+		h.programs["ollama"] = true
+		log := filepath.Join(t.TempDir(), "ollama.log")
+		h.outputs["sysrc -n ollama_log"] = log
+		h.write(log, "time=2026-10-12T21:16:55 level=INFO msg=starting\n\n"+
+			"Error: could not create directory \x1b[31mmkdir /.ollama\x1b[0m: permission denied\n")
+		cfg := h.settings()
+		code, out := h.configure(h.machine("freebsd", false), cfg, cfg, filepath.Join(t.TempDir(), "config"), "y")
+		if code != exitError || isConfigured() {
+			t.Errorf("exit code %d, configured %v; want 1 and false\n%s", code, isConfigured(), out)
+		}
+		for _, want := range []string{
+			"Ollama was started but does not answer at " + h.srv.URL,
+			"Its log, " + log + ", ends with: time=2026-10-12T21:16:55 level=INFO msg=starting " +
+				"Error: could not create directory [31mmkdir /.ollama[0m: permission denied",
+			"BeastiePilot is not ready yet.",
+		} {
+			if !says(out, want) {
+				t.Errorf("output lacks %q\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "\x1b") {
+			t.Errorf("an escape sequence from the log reached the terminal\n%q", out)
+		}
+
+		// A log that only root may read: the command that shows it.
+		if os.Geteuid() != 0 {
+			if err := os.Chmod(log, 0); err != nil {
+				t.Fatal(err)
+			}
+			_, out = h.configure(h.machine("freebsd", false), cfg, cfg, filepath.Join(t.TempDir(), "config"), "y")
+			if want := "reading it needs root: su root -c 'tail -n 20 " + log + "'"; !says(out, want) {
+				t.Errorf("output lacks %q\n%s", want, out)
+			}
+		}
+
+		// No log at all.
+		h.outputs["sysrc -n ollama_log"] = filepath.Join(t.TempDir(), "none.log")
+		_, out = h.configure(h.machine("freebsd", false), cfg, cfg, filepath.Join(t.TempDir(), "config"), "y")
+		if !says(out, "says nothing about it.") {
+			t.Errorf("output does not say that the log is empty\n%s", out)
 		}
 	})
 

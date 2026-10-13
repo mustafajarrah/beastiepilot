@@ -22,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // The configure command: a first-time setup that brings the machine to the
@@ -40,6 +41,10 @@ const (
 
 	// startPatience is how long Ollama is given to answer after being started.
 	startPatience = 30 * time.Second
+
+	// serviceLogLines is how much of the Ollama service's log is shown when
+	// the server does not come up.
+	serviceLogLines = 10
 
 	// probeTimeout is how long a question to Ollama about its state may take.
 	probeTimeout = 5 * time.Second
@@ -330,10 +335,102 @@ func (s *setup) ollama() error {
 	}
 	if err != nil {
 		s.warn("Ollama was started but does not answer at %s (%v).", where, err)
+		s.serviceLog()
 		return halt(exitError)
 	}
 	s.done("Running at %s (version %s).", where, version)
 	return nil
+}
+
+// serviceLogPath returns where FreeBSD's Ollama service keeps its log: what
+// rc.conf says, or else the name the service script makes up from the user it
+// runs as.
+func (s *setup) serviceLogPath() string {
+	if path, err := s.m.output("sysrc", "-n", "ollama_log"); err == nil && path != "" {
+		return path
+	}
+	user, err := s.m.output("sysrc", "-n", "ollama_user")
+	if err != nil || user == "" {
+		user = "nobody"
+	}
+	return "/var/log/ollama-" + user + ".log"
+}
+
+// serviceLog shows the end of the log of FreeBSD's Ollama service, which is
+// where a server that stopped right after it was started says why.
+func (s *setup) serviceLog() {
+	path := s.serviceLogPath()
+	say := func(format string, args ...any) {
+		for _, line := range wrap(fmt.Sprintf(format, args...), 70) {
+			fmt.Fprintf(s.ui.out, "      %s\n", line)
+		}
+	}
+	lines, err := lastLines(path, serviceLogLines)
+	switch {
+	case errors.Is(err, fs.ErrPermission) && plainWord(path):
+		_, shown := s.m.rootCommand("tail -n 20 " + path)
+		say("Its log should say why, and reading it needs root:")
+		fmt.Fprintf(s.ui.out, "\n        %s\n", s.ui.paint(boldGreen, shown))
+	case errors.Is(err, fs.ErrPermission):
+		say("Its log should say why, and reading it needs root: %s", path)
+	case len(lines) == 0:
+		say("Its log, %s, says nothing about it.", path)
+	default:
+		say("Its log, %s, ends with:", path)
+		fmt.Fprintln(s.ui.out)
+		for _, line := range lines {
+			fmt.Fprintf(s.ui.out, "        %s\n", s.ui.paint(dim, line))
+		}
+	}
+}
+
+// lastLines returns up to n of the last lines of the file at path, without
+// the blank ones, made fit to print: control characters are dropped, so that
+// the file cannot drive the terminal, and long lines are cut short.
+func lastLines(path string, n int) ([]string, error) {
+	const tail, width = 16 << 10, 160
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	cut := false
+	if info, err := f.Stat(); err == nil && info.Size() > tail {
+		if _, err := f.Seek(-tail, io.SeekEnd); err != nil {
+			return nil, err
+		}
+		cut = true
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, tail))
+	if err != nil {
+		return nil, err
+	}
+	all := strings.Split(string(raw), "\n")
+	if cut {
+		all = all[1:] // the rest of a line that started earlier
+	}
+	var lines []string
+	for _, line := range all {
+		line = strings.TrimSpace(strings.Map(func(r rune) rune {
+			switch {
+			case r == '\t':
+				return ' '
+			case !unicode.IsPrint(r):
+				return -1
+			}
+			return r
+		}, line))
+		if r := []rune(line); len(r) > width {
+			line = string(r[:width]) + " ..."
+		}
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines, nil
 }
 
 // probe asks Ollama for its version, which tells whether it is running.
@@ -667,6 +764,13 @@ func (s *setup) summary() int {
 		fmt.Fprintln(s.ui.out)
 		return exitError
 	}
+	noted, err := markConfigured()
+	if err != nil {
+		s.heading("Not ready yet")
+		s.text("Everything BeastiePilot needs is in place, but that could not be noted down, and until it is no request is accepted: %v", err)
+		fmt.Fprintln(s.ui.out)
+		return exitError
+	}
 	s.heading("Ready")
 	if ix, err := openIndex(indexPath()); err == nil {
 		s.text("Commands come from %s, with %s from %s of reference material at hand.",
@@ -675,12 +779,64 @@ func (s *setup) summary() int {
 	} else {
 		s.text("Commands come from %s alone: there is no index of reference material.", s.cfg.Model)
 	}
+	if noted {
+		s.text("Requests are accepted from now on: %s says that the setup is done.", configuredPath())
+	}
 	name := "beastiepilot"
 	if _, err := s.m.lookPath(name); err != nil && s.m.exe != "" && s.m.exe != programDir+"/"+name {
 		name = s.m.exe
 	}
 	fmt.Fprintf(s.ui.out, "\n    Try it:\n\n        %s\n\n", s.ui.paint(boldGreen, name+" show the free disk space"))
 	return exitOK
+}
+
+// configuredPath returns the file whose presence says that the setup has
+// finished, with BeastiePilot ready, for this user. Until it exists nothing is
+// sent to a model. It lives under the user's state directory, honoring
+// XDG_STATE_HOME, because it describes this machine and is not a setting. It
+// is "" if that directory is unknown.
+func configuredPath() string {
+	dir := os.Getenv("XDG_STATE_HOME")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(dir, "beastiepilot", "configured")
+}
+
+// isConfigured reports whether the setup has finished for this user.
+func isConfigured() bool {
+	path := configuredPath()
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// markConfigured notes that the setup has finished for this user. It reports
+// whether that is news.
+func markConfigured() (noted bool, err error) {
+	path := configuredPath()
+	if path == "" {
+		return false, errors.New("the home directory is unknown (set XDG_STATE_HOME)")
+	}
+	if isConfigured() {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, err
+	}
+	note := fmt.Sprintf("\"beastiepilot configure\" finished for this user on %s (%s).\n"+
+		"While this file exists, BeastiePilot sends requests to the model.\n",
+		time.Now().Format("2006-01-02"), buildVersion())
+	if err := os.WriteFile(path, []byte(note), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // populated reports whether dir is a directory with something in it.

@@ -227,6 +227,17 @@ func run() int {
 	}
 	ui := newStyler(tty)
 
+	if mistypedConfigure(intent) {
+		ui.errorf("%q looks like a mistyped \"configure\" and was not sent to the model; to set this machine up, run \"beastiepilot configure\"", intent)
+		return exitUsage
+	}
+	// Nothing goes to a model, neither a request nor text to index, until the
+	// setup has finished once: before that there may be no Ollama to ask.
+	if !configure && !isConfigured() {
+		ui.errorf("not set up yet: run \"beastiepilot configure\" first; nothing was sent to the model")
+		return exitError
+	}
+
 	// Settings come from the defaults, then the configuration files, then the
 	// environment; flags given on the command line override them all.
 	cfg, configFiles, err := loadSettings(*configPath)
@@ -423,6 +434,49 @@ func queryFailure(ui styler, cfg settings, err error) int {
 	}
 }
 
+// mistypedConfigure reports whether intent is a single word that is not
+// "configure" but was probably meant to be: a typing slip, a shortened form
+// or another capitalization. Sent to the model, it would only come back as a
+// command nobody asked for.
+func mistypedConfigure(intent string) bool {
+	const want = "configure"
+	word := strings.ToLower(intent)
+	if intent == want || strings.ContainsAny(word, " \t\r\n") {
+		return false
+	}
+	if len(word) >= 4 && strings.HasPrefix(want, word) {
+		return true
+	}
+	if d := len(word) - len(want); d < -2 || d > 2 {
+		return false
+	}
+	return editDistance(word, want) <= 2
+}
+
+// editDistance counts the insertions, deletions and substitutions of one
+// character, and the swaps of two neighbours, that turn a into b.
+func editDistance(a, b string) int {
+	before, prev, cur := make([]int, len(b)+1), make([]int, len(b)+1), make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+			if i > 1 && j > 1 && a[i-1] == b[j-2] && a[i-2] == b[j-1] {
+				cur[j] = min(cur[j], before[j-2]+1)
+			}
+		}
+		before, prev, cur = prev, cur, before
+	}
+	return prev[len(b)]
+}
+
 func usage() {
 	out := flag.CommandLine.Output()
 	fmt.Fprint(out, `Usage: beastiepilot [flags] <what you want to do>
@@ -436,7 +490,9 @@ it also explains the command. Commands listed in AUTO_RUN run without asking.
 The single word "configure" sets the machine up instead: it offers to install
 and start Ollama, download the models, install the FreeBSD source tree and
 documentation, save your settings and build the index. It asks before each
-step, and can be run again at any time.
+step, and can be run again at any time. Until it has finished once, with
+BeastiePilot ready, requests and -index are refused and nothing is sent to a
+model.
 
 With -index it reads the manual pages, documentation and files of your own
 under SOURCE_PATH, DOCS_SOURCE and RAG_SOURCE into an index. From then on the
@@ -535,7 +591,7 @@ func suggest(ctx context.Context, endpoint, model, system, intent string) (strin
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("cannot reach Ollama at %s (is it running? try \"service ollama start\"): %w", endpoint, err)
+		return "", fmt.Errorf("cannot reach Ollama at %s (is it running? try \"beastiepilot configure\"): %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 

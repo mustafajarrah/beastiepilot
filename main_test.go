@@ -34,6 +34,62 @@ func TestCleanCommand(t *testing.T) {
 	}
 }
 
+func TestMistypedConfigure(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"configure", false}, // the command itself
+		{"cofigure", true},
+		{"confgure", true},
+		{"confiugre", true},
+		{"configur", true},
+		{"configured", true},
+		{"configurar", true},
+		{"Configure", true},
+		{"CONFIGURE", true},
+		{"config", true},
+		{"conf", true},
+		{"con", false},
+		{"figure", false},
+		{"uptime", false},
+		{"reboot", false},
+		{"cofigure nginx", false}, // a request like any other
+		{"configure nginx to listen on port 8080", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := mistypedConfigure(tt.in); got != tt.want {
+			t.Errorf("mistypedConfigure(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestEditDistance(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"", "", 0},
+		{"", "abc", 3},
+		{"abc", "abc", 0},
+		{"abc", "abd", 1},
+		{"abc", "ac", 1},
+		{"abc", "acb", 1}, // neighbours swapped
+		{"cofigure", "configure", 1},
+		{"config", "configure", 3},
+		{"kitten", "sitting", 3},
+	}
+	for _, tt := range tests {
+		if got := editDistance(tt.a, tt.b); got != tt.want {
+			t.Errorf("editDistance(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+		if got := editDistance(tt.b, tt.a); got != tt.want {
+			t.Errorf("editDistance(%q, %q) = %d, want %d", tt.b, tt.a, got, tt.want)
+		}
+	}
+}
+
 func TestValidateCommand(t *testing.T) {
 	tests := []struct {
 		name, in string

@@ -65,7 +65,7 @@ func embed(ctx context.Context, endpoint, model string, inputs []string) ([][]fl
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach Ollama at %s (is it running? try \"service ollama start\"): %w", target, err)
+		return nil, fmt.Errorf("cannot reach Ollama at %s (is it running? try \"beastiepilot configure\"): %w", target, err)
 	}
 	defer resp.Body.Close()
 
