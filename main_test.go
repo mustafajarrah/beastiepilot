@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -539,6 +540,54 @@ func TestEndpointHost(t *testing.T) {
 	} {
 		if got := endpointHost(in); got != want {
 			t.Errorf("endpointHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCommented(t *testing.T) {
+	installed := wordSet("pkg df du which service cd /usr/sbin/pkg")
+	lookPath := func(name string) (string, error) {
+		if installed[name] {
+			return name, nil
+		}
+		return "", errors.New("not found")
+	}
+	tests := []struct {
+		reply, want string
+	}{
+		// A command where the refusal goes.
+		{"# pkg install xorg-wayland", "pkg install xorg-wayland"},
+		{"#pkg install xorg", "pkg install xorg"},
+		{"## df -h\n", "df -h"},
+		{"  # du -sh .", "du -sh ."},
+		{"# cd /usr/ports/www/nginx && make install clean", "cd /usr/ports/www/nginx && make install clean"},
+		{"# ASSUME_ALWAYS_YES=yes pkg install nginx", "ASSUME_ALWAYS_YES=yes pkg install nginx"},
+		{"# /usr/sbin/pkg info", "/usr/sbin/pkg info"},
+		{"# df", "df"},
+
+		// A refusal in words.
+		{"# This cannot be done with a shell command.", ""},
+		{"# Which web server?", ""},
+		{"# which web server?", ""},
+		{"# pkg is not installed here", ""},
+		{"# pkg cannot find a package of that name", ""},
+		{"# pkg não achou esse pacote", ""},
+		{"# service names are needed for that.", ""},
+		{"# df: which filesystem", ""},
+		{"# nginx is not running", ""},
+		{"# Pkg install nginx", ""},
+		{"#", ""},
+		{"# ", ""},
+		{"# A=b", ""},
+		// Not a comment at all, or more than one line: left to the rest.
+		{"pkg install nginx", ""},
+		{"# first\n# pkg install nginx", ""},
+		{"# pkg install nginx\npkg clean", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := commented(tt.reply, lookPath); got != tt.want {
+			t.Errorf("commented(%q) = %q, want %q", tt.reply, got, tt.want)
 		}
 	}
 }

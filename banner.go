@@ -147,17 +147,17 @@ var beastieSprite = []string{
 	"........rrrkrrrrrrrrkrrr....",
 	"........rrrrkkkkkkkkrrrr....", // grin
 	".........rrrrrrrrrrrrrr.....",
-	"..r........drrrrrrrrd....s.s", // tail tip, chin, wrench jaws
-	".rrr.........dddddd......sss",
-	"rrrrr.....rrrrrrrrrrrr....s.",
-	"..r......rrrrrrrrrrrrrr...s.",
-	"..r.....rrdrrrrrrrrrrdrr..s.",
-	"..rr....rrdrrrrrrrrrrdrrr.s.",
-	"...r....rrdrrrrrrrrrrd.rrrrr", // fist around the wrench
-	"...r.......rrrrrrrrrr.......",
-	"....r......dddddddddd.......", // belt
-	"....rr....rrrrrrrrrrrr......",
-	".....rrrrrrrrrr.rrrrr.......", // tail joins the body
+	"..r....gg..drrrrrrrrd..gg...", // tail tip, chin, grips of the yoke
+	".rrr...ss....dddddd....ss...",
+	"rrrrr..ss.rrrrrrrrrrrr.ss...",
+	"..r...rrrrrrrrrrrrrrrrrrrr..", // arms out to the fists around the grips
+	"..r...rrrrdrrrrrrrrrrdrrrr..",
+	"..rr...ss.rrrrrrrrrrrr.ss...", // the wheel comes down and round
+	"...r...sssrrrrrrrrrrrrsss...",
+	"...r....sssrrrrrrrrrrsss....",
+	"....r....ssssskkkksssss.....", // to the hub, in front of the belt
+	"....rr....rrrskyyksrrr......",
+	".....rrrrrrrrrrkkrrrrr......", // tail joins the body
 	"..........rrrr...rrrr.......",
 	"..........rrr....rrr........",
 	"........ddddd....ddddd......", // feet
@@ -178,12 +178,12 @@ var spriteColors = map[byte]spriteColor{
 	'p': {0xe2, 0x60, 0x4f, 203}, // cheeks and nose
 	'n': {0x2b, 0x41, 0x60, 24},  // cap
 	'm': {0x1e, 0x2a, 0x42, 17},  // cap in shadow, visor
-	'y': {0xe0, 0xa0, 0x30, 214}, // badge
-	's': {0x8a, 0x9e, 0xa3, 247}, // steel: goggle frames, wrench
-	'g': {0x5a, 0x78, 0x88, 67},  // goggle glass
+	'y': {0xe0, 0xa0, 0x30, 214}, // badge, cap of the yoke's hub
+	's': {0x8a, 0x9e, 0xa3, 247}, // steel: goggle frames, yoke
+	'g': {0x5a, 0x78, 0x88, 67},  // goggle glass, grips of the yoke
 	'b': {0x6c, 0x3c, 0x2c, 94},  // leather strap
 	'w': {0xe8, 0xe6, 0xd0, 255}, // eye highlights, glint
-	'k': {0x14, 0x17, 0x1a, 16},  // pupils and grin
+	'k': {0x14, 0x17, 0x1a, 16},  // pupils, grin, hub of the yoke
 }
 
 // sgr returns the escape sequence selecting c as the foreground (layer 38)

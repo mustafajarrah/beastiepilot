@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -244,5 +245,60 @@ func TestNoticeWraps(t *testing.T) {
 		"    root through su, which asks for root's password.\n\n"
 	if out.String() != want {
 		t.Errorf("the suggestion was shown as\n%q\nwant\n%q", out.String(), want)
+	}
+}
+
+// TestCommandInComment covers a model that puts its command where a refusal
+// goes: the command is offered, with a word about it, and asked about even
+// when AUTO_RUN lists it. A refusal in words stays one.
+func TestCommandInComment(t *testing.T) {
+	isolate(t)
+	log := standIns(t)
+	var asked []generateRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req generateRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		asked = append(asked, req)
+		if strings.Contains(req.Prompt, "list") {
+			io.WriteString(w, `{"response":"# pkg info -a","done":true}`)
+			return
+		}
+		io.WriteString(w, `{"response":"# pkg has no package of that name","done":true}`)
+	}))
+	defer srv.Close()
+	cfg := defaultSettings()
+	cfg.Endpoint, cfg.Banner, cfg.AutoRun = srv.URL, bannerOff, "pkg info"
+
+	var out bytes.Buffer
+	p := &pilot{ui: styler{out: &out}, in: strings.NewReader("list them\ny\ninstall that one\n"), cfg: cfg, root: true}
+	if code := p.session(); code != exitOK {
+		t.Errorf("the session ended with %d, want 0", code)
+	}
+	shown := out.String()
+	for _, want := range []string{
+		"Suggested command (llama3.2)",
+		"The model gave this as a comment, where it is told to say that a request is unclear or cannot be done: it may not be what you asked for.",
+		"Execute this command? [y/N]",
+		"Exit status 3",
+		"! pkg has no package of that name",
+	} {
+		if !says(shown, want) {
+			t.Errorf("the session never showed %q:\n%s", want, shown)
+		}
+	}
+	if says(shown, "Listed in AUTO_RUN") {
+		t.Errorf("a command given as a comment ran unasked:\n%s", shown)
+	}
+	raw, _ := os.ReadFile(log)
+	if got, want := string(raw), "pkg info -a\n"; got != want {
+		t.Errorf("this ran:\n%s\nwant:\n%s", got, want)
+	}
+	if len(p.past) != 2 || p.past[0].command != "pkg info -a" || p.past[0].outcome != "it ran and exited with status 3" ||
+		p.past[1].command != "" || p.past[1].outcome != "you gave no command: pkg has no package of that name" {
+		t.Errorf("the session remembers %+v", p.past)
+	}
+	// The model is told of the command it gave, not of a refusal.
+	if want := "Command: pkg info -a\n    Outcome: it ran and exited with status 3\n"; len(asked) != 2 || !strings.Contains(asked[1].System, want) {
+		t.Errorf("the second request lacks %q", want)
 	}
 }

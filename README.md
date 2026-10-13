@@ -20,8 +20,8 @@ $ beastiepilot install nginx and enable it at boot
 ```
 
 On a roomy color terminal the mascot above is replaced by a pixel-art Beastie
-who wags his tail and blinks while the model is thinking; see
-[The banner](#the-banner).
+at the yoke of an airplane, who wags his tail and blinks while the model is
+thinking; see [The banner](#the-banner).
 
 ## Features
 
@@ -503,6 +503,8 @@ exactly: `df` does not cover `/tmp/df` or `./df`.
 - It was not flagged as destructive (see [Safety](#safety)).
 - It would not run as root (see
   [Commands that need root](#commands-that-need-root)).
+- The model gave it as a command, not inside a comment, which is where it is
+  told to put a refusal.
 - The mode is `safe`. `guided` always asks.
 
 Anything else falls back to the usual question. With `-verbose`, BeastiePilot
@@ -716,9 +718,10 @@ model and Ollama host in use, the working directory and the mode. It only
 appears on an interactive terminal, and comes in three forms:
 
 - **Pixel art**, used with `BANNER=full` when the locale is UTF-8, colors are
-  enabled and the terminal has room for it (17 lines tall). While the model is
-  thinking Beastie wags his tail, blinks, and his goggles catch the light. It
-  uses 256 colors, or 24-bit color when `COLORTERM` says the terminal has it.
+  enabled and the terminal has room for it (17 lines tall). Beastie holds the
+  yoke of an airplane with both hands, and while the model is thinking he wags
+  his tail, blinks, and his goggles catch the light. It uses 256 colors, or
+  24-bit color when `COLORTERM` says the terminal has it.
 - **Compact**, the four-line mascot shown at the top of this page. It is used
   with `BANNER=compact`, with `NO_COLOR`, and whenever the terminal is too
   small for the pixel art.
@@ -764,7 +767,10 @@ prompt only steers the model; the protections below are enforced in code.
   to display something different from what would be executed.
 - **The model may decline.** When a request is ambiguous or not achievable, it
   is instructed to say so instead of guessing, and BeastiePilot reports that
-  without offering anything to run.
+  without offering anything to run. A small model that is not sure sometimes
+  puts a command where the refusal goes, as in `# pkg install nginx`. Such a
+  command is offered like any other, under a notice that says where it came
+  from, and never runs through `AUTO_RUN`.
 - **Indexed files can steer the model.** Excerpts of your reference material
   become part of the prompt, so a document that says "run this" can influence
   the suggestion. The model is told to treat excerpts as data, which is advice

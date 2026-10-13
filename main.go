@@ -352,6 +352,13 @@ func (p *pilot) answer(intent string) int {
 		p.fail("%v", err)
 		return exitError
 	}
+	// A model that is not sure tends to put the command where its refusal
+	// goes. Shown as a refusal it would be a command nobody can run, so it is
+	// offered as one, with a word about where it came from.
+	hedged := false
+	if inside := commented(command, exec.LookPath); inside != "" {
+		command, hedged = inside, true
+	}
 	if reason, ok := declined(command); ok {
 		fmt.Fprintf(ui.out, "\n  %s %s\n", ui.paint(boldYellow, "!"), reason)
 		if !p.inSession {
@@ -362,6 +369,9 @@ func (p *pilot) answer(intent string) int {
 	}
 
 	rev := inspect(command)
+	if hedged {
+		rev.notices = append(rev.notices, "The model gave this as a comment, where it is told to say that a request is unclear or cannot be done: it may not be what you asked for.")
+	}
 	rev.notices = append(rev.notices, hostNotices()...)
 	// A command that only root can run goes through the tool this machine has
 	// for that, once the user has agreed to it.
@@ -396,7 +406,7 @@ func (p *pilot) answer(intent string) int {
 
 	// Decide whether to run it. The question is skipped only in safe mode, for
 	// a command made entirely of AUTO_RUN entries that inspect did not flag as
-	// destructive and that runs as the user.
+	// destructive, that runs as the user and that the model gave as a command.
 	destructive := len(rev.dangers) > 0
 	auto, why := false, ""
 	switch {
@@ -405,6 +415,8 @@ func (p *pilot) answer(intent string) int {
 		why = "it looks destructive"
 	case raise != nil:
 		why = "it would run as root"
+	case hedged:
+		why = "the model gave it as a comment"
 	default:
 		auto, why = autoRun(command, cfg.autoRunList())
 	}
@@ -877,6 +889,47 @@ func declined(command string) (reason string, ok bool) {
 		return "The model could not suggest a command for this request.", true
 	}
 	return strings.Join(parts, " "), true
+}
+
+// notVerbs are the words that follow the subject of a sentence and never the
+// name of a command: "pkg is not installed", "pkg não achou o pacote".
+var notVerbs = wordSet(`is are was were has have had does do did can cannot can't could will
+	would should must may might not no é não nao está pode tem foi`)
+
+// commented returns the command a reply holds when the model put its answer
+// where a refusal goes: a single comment whose text is a command, as in
+// "# pkg install nginx". For a refusal in words it returns "".
+//
+// A reason is a sentence and a command is not. To count as a command, the
+// text must begin with the name of a program this machine has, in lower case,
+// must not go on like a sentence about that program and must not end like one.
+// Whatever fails that stays a refusal, which costs nothing but a request.
+func commented(reply string, lookPath func(string) (string, error)) string {
+	line := strings.TrimSpace(reply)
+	if !strings.HasPrefix(line, "#") || strings.Contains(line, "\n") {
+		return ""
+	}
+	text := strings.TrimSpace(strings.TrimLeft(line, "#"))
+	words := strings.Fields(text)
+	// VAR=value before the command is not its name.
+	for len(words) > 0 && isAssignment(words[0]) {
+		words = words[1:]
+	}
+	if len(words) == 0 {
+		return ""
+	}
+	name, last := words[0], words[len(words)-1]
+	if name != strings.ToLower(name) || len(words) > 1 && notVerbs[strings.ToLower(words[1])] {
+		return ""
+	}
+	// "du -sh ." ends with a directory, "pkg cannot do that." with a full stop.
+	if strings.ContainsAny(last[len(last)-1:], "?!:") || strings.HasSuffix(last, ".") && strings.Trim(last, ".") != "" {
+		return ""
+	}
+	if _, err := lookPath(name); err != nil {
+		return ""
+	}
+	return text
 }
 
 // review is what inspect found in a suggested command.
