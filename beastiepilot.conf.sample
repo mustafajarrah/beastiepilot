@@ -47,6 +47,13 @@
 #   safe    show the command, then ask
 #TYPE=safe
 
+# After a command has run, show the model what it printed, for it to say what
+# came of it. The latest outputs, cut to size, are also kept in the history
+# and go along with the requests that follow, so that "install the second
+# one" means something after a search. With false, commands run unseen: what
+# they print goes to your terminal and nowhere else.
+#COMMENT=true
+
 # Commands that safe mode runs WITHOUT asking, separated by commas. Empty by
 # default: every command asks. An entry is a command name, optionally followed
 # by its first arguments, and "*" stands for any one argument. For example:

@@ -998,7 +998,7 @@ func TestSetConfigKey(t *testing.T) {
 // is what lets configure set one without disturbing the rest.
 func TestSampleConfigTakesEverySetting(t *testing.T) {
 	values := map[string]string{
-		"MODEL": "m", "EMBED_MODEL": "e", "ENDPOINT": "http://h/api/generate", "TIMEOUT": "7m0s", "CONTEXT": "8192", "HISTORY": "7", "TYPE": typeGuided,
+		"MODEL": "m", "EMBED_MODEL": "e", "ENDPOINT": "http://h/api/generate", "TIMEOUT": "7m0s", "CONTEXT": "8192", "HISTORY": "7", "TYPE": typeGuided, "COMMENT": "false",
 		"AUTO_RUN": "df, zfs list", "PACKAGE_MANAGER": "ports", "SOURCE_PATH": "/s", "DOCS_SOURCE": "/d:/e",
 		"RAG_SOURCE": "/my books", "BANNER": bannerCompact, "VERBOSE": "true",
 	}

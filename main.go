@@ -200,6 +200,7 @@ func run() int {
 	flag.Int("context", def.Context, "context window asked of Ollama, in `tokens`")
 	flag.Int("history", def.History, "send the last `n` requests to the model along with each new one; 0 keeps none")
 	flag.String("type", def.Type, "what to do with a suggestion: `guided|safe`")
+	flag.Bool("comment", def.Comment, "show the model what a command printed, for it to say what came of it")
 	flag.String("auto-run", def.AutoRun, "comma-separated `commands` that safe mode runs without asking")
 	flag.String("package-manager", def.PackageManager, "install software with `pkg|ports`")
 	flag.String("source-path", def.SourcePath, "`directory` holding the FreeBSD source tree")
@@ -262,7 +263,7 @@ func run() int {
 	saved := cfg
 	flagKeys := map[string]string{
 		"model": "MODEL", "embed-model": "EMBED_MODEL", "endpoint": "ENDPOINT", "timeout": "TIMEOUT", "type": "TYPE",
-		"context": "CONTEXT", "history": "HISTORY",
+		"context": "CONTEXT", "history": "HISTORY", "comment": "COMMENT",
 		"auto-run": "AUTO_RUN", "package-manager": "PACKAGE_MANAGER", "verbose": "VERBOSE",
 		"source-path": "SOURCE_PATH", "docs-source": "DOCS_SOURCE", "rag-source": "RAG_SOURCE",
 	}
@@ -308,6 +309,9 @@ func run() int {
 	if tty != nil {
 		p.tty, p.in = tty, tty
 	}
+	if canRecord(cfg) {
+		p.record = record
+	}
 	p.recall()
 	if interactive {
 		return p.session()
@@ -327,6 +331,10 @@ type pilot struct {
 	root        bool // whoever runs this is root
 	animate     bool // the banner is right above, to animate while waiting
 	inSession   bool // requests come one after another, on the terminal
+
+	// record runs a command so that what it prints can be shown to the model,
+	// or is nil when commands run unseen.
+	record func(*exec.Cmd) (code int, output string, seen bool, err error)
 
 	history       string     // the file earlier requests are kept in, or "" to keep them for this run only
 	past          []exchange // the earlier requests, oldest first: the last HISTORY of them
@@ -386,7 +394,7 @@ func (p *pilot) answer(intent string) int {
 		if !p.inSession {
 			fmt.Fprintln(ui.out)
 		}
-		p.remember(intent, "", "you gave no command: "+reason)
+		p.remember(intent, "", "you gave no command: "+reason, "")
 		return exitError
 	}
 
@@ -454,20 +462,20 @@ func (p *pilot) answer(intent string) int {
 	default:
 		if !p.confirm(destructive, raise != nil) {
 			fmt.Fprintf(ui.out, "  %s\n", ui.paint(dim, "Aborted. Nothing was executed."))
-			p.remember(intent, command, "the user chose not to run it")
+			p.remember(intent, command, "the user chose not to run it", "")
 			return exitOK
 		}
 		fmt.Fprintln(ui.out)
 	}
 
-	run, how := func() (int, error) { return execute(command) }, "it ran"
+	cmd, how := exec.Command("/bin/sh", "-c", command), "it ran"
 	if raise != nil {
-		run, how = raise.execute, "it ran as root"
+		cmd, how = raise.start(), "it ran as root"
 	}
-	code, err := run()
+	code, output, seen, err := p.run(cmd)
 	if err != nil {
 		p.fail("%v", err)
-		p.remember(intent, command, "it could not be run")
+		p.remember(intent, command, "it could not be run", "")
 		return exitError
 	}
 	outcome, status := fmt.Sprintf("%s and exited with status %d", how, code), fmt.Sprintf("Exit status %d", code)
@@ -476,9 +484,13 @@ func (p *pilot) answer(intent string) int {
 		outcome += ", as " + name + " does when nothing matches"
 		status += ": " + name + " ends that way when nothing matches."
 	}
-	p.remember(intent, command, outcome)
+	p.remember(intent, command, outcome, output)
 	if p.inSession && code != exitOK {
 		fmt.Fprintf(ui.out, "\n  %s\n", ui.paint(dim, status))
+	}
+	// A command the user stopped with Ctrl-C needs no word about it.
+	if seen && code != 128+int(syscall.SIGINT) {
+		p.comment(intent, command, code, output)
 	}
 	return code
 }
@@ -665,6 +677,10 @@ it also explains the command. Commands listed in AUTO_RUN run without asking.
 With no request it opens a session on the terminal and takes requests one
 after another. /help lists what else can be typed there; /exit or Ctrl-D
 leaves.
+
+Once a command has run, the model is shown what it printed and says what came
+of it, unless COMMENT is false. The command runs inside script(1) for that,
+and has the terminal as it always did.
 
 A request can build on the ones before it: the last HISTORY requests, with the
 command given for each and what came of it, are kept from one run to the next
@@ -1316,14 +1332,9 @@ func readLine(r io.Reader) (string, error) {
 	}
 }
 
-// execute runs command through /bin/sh with the caller's stdin, stdout and
-// stderr attached and returns the command's exit code. The error is non-nil
-// only if the shell could not be run at all.
-func execute(command string) (int, error) {
-	return runCommand(exec.Command("/bin/sh", "-c", command))
-}
-
-// runCommand runs cmd as execute describes.
+// runCommand runs cmd with the caller's stdin, stdout and stderr attached and
+// returns its exit code. The error is non-nil only if it could not be run at
+// all.
 func runCommand(cmd *exec.Cmd) (int, error) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

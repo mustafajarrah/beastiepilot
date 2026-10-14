@@ -47,8 +47,8 @@ func TestHistorySection(t *testing.T) {
 	}
 
 	p, _ := remembering(5, "")
-	p.remember("list the\ndatasets", "zfs list", "it ran and exited with status 0")
-	p.remember("restart the web server", "", "you gave no command: which web server?")
+	p.remember("list the\ndatasets", "zfs list", "it ran and exited with status 0", "")
+	p.remember("restart the web server", "", "you gave no command: which web server?", "")
 	got := historySection(p.past)
 	for _, want := range []string{
 		"EARLIER REQUESTS",
@@ -63,7 +63,7 @@ func TestHistorySection(t *testing.T) {
 
 	// Only the last HISTORY are kept, and a long one is cut.
 	for i := 0; i < 8; i++ {
-		p.remember(strings.Repeat("x", maxPastChars+50), "true", "the user chose not to run it")
+		p.remember(strings.Repeat("x", maxPastChars+50), "true", "the user chose not to run it", "")
 	}
 	got = historySection(p.past)
 	if len(p.past) != 5 || strings.Contains(got, "zfs list") || strings.Contains(got, "[6]") {
@@ -75,7 +75,7 @@ func TestHistorySection(t *testing.T) {
 
 	// With HISTORY=0 nothing is.
 	p, _ = remembering(0, "")
-	p.remember("list the datasets", "zfs list", "it ran and exited with status 0")
+	p.remember("list the datasets", "zfs list", "it ran and exited with status 0", "")
 	if len(p.past) != 0 {
 		t.Errorf("with HISTORY=0, %d requests were kept", len(p.past))
 	}
@@ -86,7 +86,7 @@ func TestRecent(t *testing.T) {
 	for i := 1; i <= 40; i++ {
 		past = append(past, exchange{Request: fmt.Sprintf("request number %02d", i), Command: "df -h", Outcome: "it ran and exited with status 0"})
 	}
-	header, each := tokens(historyHeader), tokens(past[0].entry(len(past)))
+	header, each := tokens(historyHeader), tokens(past[0].entry(len(past), false))
 	tests := []struct {
 		name        string
 		limit, room int
@@ -131,8 +131,8 @@ func TestHistoryFile(t *testing.T) {
 
 	p, out := remembering(3, file)
 	p.recall() // there is none yet
-	p.remember("install nginx and\nstart it", "pkg install nginx && service nginx start > /dev/null", "the user chose not to run it")
-	p.remember("restart the web server", "", "you gave no command: which web server?")
+	p.remember("install nginx and\nstart it", "pkg install nginx && service nginx start > /dev/null", "the user chose not to run it", "")
+	p.remember("restart the web server", "", "you gave no command: which web server?", "")
 	if out.Len() != 0 {
 		t.Errorf("keeping two requests said %q", out.String())
 	}
@@ -165,8 +165,8 @@ func TestHistoryFile(t *testing.T) {
 	if got := requests(p.past); got != "install nginx and start it|restart the web server" {
 		t.Errorf("the next run recalls %q", got)
 	}
-	p.remember("three", "true", "it ran and exited with status 0")
-	p.remember("four", "true", "it ran and exited with status 0")
+	p.remember("three", "true", "it ran and exited with status 0", "")
+	p.remember("four", "true", "it ran and exited with status 0", "")
 	if got := requests(p.past); got != "restart the web server|three|four" {
 		t.Errorf("with a fourth, it has %q; want the last three", got)
 	}
@@ -222,10 +222,10 @@ func TestHistoryFile(t *testing.T) {
 
 	// With HISTORY=0 the file is neither read nor written.
 	p, _ = remembering(5, file)
-	p.remember("kept", "true", "it ran and exited with status 0")
+	p.remember("kept", "true", "it ran and exited with status 0", "")
 	p, _ = remembering(0, file)
 	p.recall()
-	p.remember("not kept", "true", "it ran and exited with status 0")
+	p.remember("not kept", "true", "it ran and exited with status 0", "")
 	if len(p.past) != 0 || len(fileLines(t, file)) != 1 {
 		t.Errorf("with HISTORY=0 it has %d requests and the file %d lines; want none and the one", len(p.past), len(fileLines(t, file)))
 	}
@@ -239,8 +239,8 @@ func TestHistoryFileUnusable(t *testing.T) {
 	}
 	p, out := remembering(5, filepath.Join(blocked, "beastiepilot", "history"))
 	p.recall()
-	p.remember("one", "true", "it ran and exited with status 0")
-	p.remember("two", "true", "it ran and exited with status 0")
+	p.remember("one", "true", "it ran and exited with status 0", "")
+	p.remember("two", "true", "it ran and exited with status 0", "")
 	if got := requests(p.past); got != "one|two" {
 		t.Errorf("it has %q, want both requests", got)
 	}
@@ -305,7 +305,7 @@ func TestHistoryGoesAlong(t *testing.T) {
 	// as fit, between the rules and the request.
 	p, _ := remembering(maxHistory, historyPath())
 	for i := 0; i < 150; i++ {
-		p.remember(fmt.Sprintf("request number %03d, about nothing in particular", i), "ls -l /usr/local/etc/rc.d", "it ran and exited with status 0")
+		p.remember(fmt.Sprintf("request number %03d, about nothing in particular", i), "ls -l /usr/local/etc/rc.d", "it ran and exited with status 0", "")
 	}
 	req, shown = run(cfg, "what next")
 	n := entries(req)

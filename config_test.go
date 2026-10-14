@@ -18,6 +18,7 @@ TIMEOUT='90s'
 CONTEXT=8192
 history = 25   # how many go along
 type=GUIDED
+COMMENT=off
 AUTO_RUN = df ,  zfs   list, service * status
 PACKAGE_MANAGER=PORTS # trailing comment
 SOURCE_PATH=/usr/obj/../src-14/
@@ -38,6 +39,7 @@ Verbose=true
 		Context:        8192,
 		History:        25,
 		Type:           typeGuided,
+		Comment:        false,
 		AutoRun:        "df, zfs list, service * status",
 		PackageManager: "ports",
 		SourcePath:     "/usr/src-14",
@@ -66,6 +68,7 @@ func TestParseSettingsErrors(t *testing.T) {
 		{"HISTORY=\n", "is not a number of requests"},
 		{"PACKAGE_MANAGER=apt\n", "use pkg or ports"},
 		{"VERBOSE=maybe\n", "not a boolean"},
+		{"COMMENT=sometimes\n", "COMMENT: \"sometimes\" is not a boolean"},
 		{"TYPE=auto\n", "use guided or safe"},
 		{"TYPE=unsafe\n", "use guided or safe"},
 		{"AUTO_RUN=df, sh\n", "test.conf:1: AUTO_RUN: \"sh\" runs other commands"},
@@ -311,7 +314,7 @@ func TestPathSettings(t *testing.T) {
 func TestSettingsGet(t *testing.T) {
 	want := settings{
 		Model: "qwen2.5-coder:7b", EmbedModel: "bge-m3", Endpoint: "http://10.0.0.5:11434/api/generate",
-		Timeout: 90 * time.Second, Context: 16384, History: 0, Type: typeGuided,
+		Timeout: 90 * time.Second, Context: 16384, History: 0, Type: typeGuided, Comment: false,
 		AutoRun: "df, zfs list, service * status", PackageManager: "ports",
 		SourcePath: "/usr/src-14", DocsSource: "/usr/share/doc:/usr/local/share/doc/freebsd", RagSource: "/home/me/My Books",
 		Banner: bannerCompact, Verbose: true,

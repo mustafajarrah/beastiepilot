@@ -49,6 +49,7 @@ type settings struct {
 	Context        int           // CONTEXT: the context window asked of Ollama, in tokens
 	History        int           // HISTORY: how many earlier requests go along with a new one
 	Type           string        // TYPE: typeGuided or typeSafe
+	Comment        bool          // COMMENT: show the model what a command printed, for it to say what came of it
 	AutoRun        string        // AUTO_RUN: commands safe mode runs unasked, as parseAutoRun returns them
 	PackageManager string        // PACKAGE_MANAGER: "pkg" or "ports"
 	SourcePath     string        // SOURCE_PATH: the FreeBSD source tree, or "" for none
@@ -59,8 +60,8 @@ type settings struct {
 }
 
 // settingKeys lists the configuration keys in the order they are documented.
-var settingKeys = []string{"MODEL", "EMBED_MODEL", "ENDPOINT", "TIMEOUT", "CONTEXT", "HISTORY", "TYPE", "AUTO_RUN",
-	"PACKAGE_MANAGER", "SOURCE_PATH", "DOCS_SOURCE", "RAG_SOURCE", "BANNER", "VERBOSE"}
+var settingKeys = []string{"MODEL", "EMBED_MODEL", "ENDPOINT", "TIMEOUT", "CONTEXT", "HISTORY", "TYPE", "COMMENT",
+	"AUTO_RUN", "PACKAGE_MANAGER", "SOURCE_PATH", "DOCS_SOURCE", "RAG_SOURCE", "BANNER", "VERBOSE"}
 
 func defaultSettings() settings {
 	return settings{
@@ -71,6 +72,7 @@ func defaultSettings() settings {
 		Context:        defaultContext,
 		History:        defaultHistory,
 		Type:           typeSafe,
+		Comment:        true,
 		PackageManager: "pkg",
 		SourcePath:     defaultSourcePath,
 		DocsSource:     defaultDocsSource,
@@ -126,6 +128,12 @@ func (s *settings) set(key, value string) error {
 			return fmt.Errorf("%q is not a type (use guided or safe)", value)
 		}
 		s.Type = v
+	case "COMMENT":
+		b, err := parseBool(value)
+		if err != nil {
+			return err
+		}
+		s.Comment = b
 	case "AUTO_RUN":
 		list, err := parseAutoRun(value)
 		if err != nil {
@@ -190,6 +198,8 @@ func (s settings) get(key string) string {
 		return strconv.Itoa(s.History)
 	case "TYPE":
 		return s.Type
+	case "COMMENT":
+		return strconv.FormatBool(s.Comment)
 	case "AUTO_RUN":
 		return s.AutoRun
 	case "PACKAGE_MANAGER":

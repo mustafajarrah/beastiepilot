@@ -35,6 +35,9 @@ the version, the model and the mode in use. See [The banner](#the-banner).
 - **A session when you want one.** Run `beastiepilot` by itself and it takes
   requests one after another, with a line editor and the earlier requests
   within reach of the arrow keys.
+- **It tells you what came of it.** Once a command has run, the model reads
+  what it printed and says whether it worked, what the answer is and, if it
+  failed, what to try next. See [What came of it](#what-came-of-it).
 - **It remembers what you asked.** Your last 100 requests, with the command
   given for each and what came of it, are kept from one run to the next and go
   to the model with each new one, so that a request can build on the ones
@@ -304,6 +307,7 @@ back for the next one.
   runs on the CPU alone, where a first answer can take minutes. Asking again
   is often enough then, the model being loaded by now; `beastiepilot -timeout
   10m` waits longer.
+- **After a command**, the model says [what came of it](#what-came-of-it).
 - **A command that fails** leaves its exit status on screen. For a search that
   found nothing (`grep`, `pgrep`, `which`, `pkg search`) the session adds that
   this is what the status means, and the next request is told so as well.
@@ -339,14 +343,68 @@ still a request. Flags apply to the whole session: `beastiepilot -type guided
 read key by key (`TERM=dumb`) it falls back to a plain prompt without the box
 and the arrow keys, and to a numbered list for the menu.
 
+### What came of it
+
+When a command has run, the model is shown what it printed, with its exit
+status, and says what came of it: whether it did what you asked, the facts in
+the output that answer the request and, if it failed, the likely cause and
+what to try next.
+
+```console
+$ beastiepilot "is there a package for hyprland?"
+
+  > Suggested command (llama3.2)
+
+    pkg search hyprland
+
+  ? Execute this command? [y/N] y
+
+hyprland-0.45.2                Dynamic tiling Wayland compositor
+hyprpaper-0.7.1                Wallpaper utility for Hyprland
+
+  > What came of it
+
+    Yes: the repository has hyprland 0.45.2, and hyprpaper 0.7.1 for
+    wallpapers.
+```
+
+- **The command still has your terminal.** It runs inside `script(1)`, which
+  gives it a terminal of its own, passes everything through to yours and keeps
+  a copy. So it asks its questions, pages, colors and takes Ctrl-C as it
+  always did, and `su`, `doas` or `sudo` ask for the password there too. The
+  copy is in a directory only you can read and is removed when the command
+  ends.
+- **What the model is shown.** The output as you saw it, without colors and
+  with a progress bar in its last state; of more than about 4000 characters,
+  the beginning and the end. Nothing you type is in it except what the
+  terminal echoed back, which a password is not.
+- **The next requests know too.** What the latest three commands printed, each
+  cut to about 600 characters, goes along with the requests that follow, so
+  `install the first one` means something after a search. It is kept in the
+  [history](#history) with the request.
+- **What it costs.** One more answer from the model after each command that
+  printed something, which takes as long as the model takes; Ctrl-C while it
+  is reading skips it. A command that printed nothing gets one line from
+  BeastiePilot and no question to the model, and so does one you stopped with
+  Ctrl-C.
+- **When it does not happen.** With `COMMENT=false`, or `-comment=false` for
+  one run, commands run as they did before this existed, unseen: what they
+  print goes to your terminal and nowhere else. The same holds when the output
+  is redirected (`beastiepilot ... > file`), without a terminal, and on a
+  system that is not FreeBSD.
+
+The comment is the model's reading of the output, and it can be wrong. It is
+shown and never run.
+
 ### History
 
 Every request is kept with the command the model gave for it and what came of
 it: whether it ran, as whom and with what exit status, that you turned it
-down, or that the model gave no command and why. What a command printed is
-never kept. The last `HISTORY` of them, 100 unless you say otherwise, go to
-the model along with each new request, from the command line as well as in a
-session, so a request can refer to one made last week.
+down, or that the model gave no command and why, and
+[what the command printed](#what-came-of-it), cut to about 600 characters. The
+last `HISTORY` of them, 100 unless you say otherwise, go to the model along
+with each new request, from the command line as well as in a session, so a
+request can refer to one made last week.
 
 ```console
 $ beastiepilot "show the free disk space"
@@ -355,8 +413,9 @@ $ beastiepilot "the same for /var only"
 
 - **Where.** In `~/.local/state/beastiepilot/history` (or under
   `$XDG_STATE_HOME`), one request to a line, as JSON, readable by you alone.
-  Each field is cut to 300 characters. The file holds up to twice `HISTORY`
-  requests; older ones are dropped from it.
+  The request, the command and the outcome are each cut to 300 characters.
+  The file holds up to twice `HISTORY` requests; older ones are dropped from
+  it.
 - **How many go along.** The last `HISTORY`, or as many of those as fit in the
   context once the instructions, the excerpts of
   [reference material](#reference-material) and your request are in it; when
@@ -364,7 +423,9 @@ $ beastiepilot "the same for /var only"
   default `CONTEXT` of 4096 tokens has room for about 50 requests of ordinary
   length, and for about 15 next to three excerpts of an index. `CONTEXT=8192`
   has room for about 120 and 90, and `CONTEXT=16384` for all 100 either way.
-  `-verbose` says how many went along with a request.
+  The output of the latest three commands takes its share of that room: three
+  long ones, about ten requests' worth. `-verbose` says how many went along
+  with a request.
 - **What it costs.** Everything that goes along is read by the model before it
   answers, so a long history makes each answer slower, noticeably so on a
   machine without a GPU, and a larger `CONTEXT` takes more memory. If the
@@ -620,6 +681,7 @@ Every setting has a key for the file, an environment variable and a flag.
 | `CONTEXT`         | `BEASTIEPILOT_CONTEXT`         | `-context`         | `4096`                                | Context window asked of Ollama, in tokens, from 4096 to 131072 |
 | `HISTORY`         | `BEASTIEPILOT_HISTORY`         | `-history`         | `100`                                 | Earlier requests kept and sent with each new one, from 0 to 1000; see [History](#history) |
 | `TYPE`            | `BEASTIEPILOT_TYPE`            | `-type`            | `safe`                                | `guided` or `safe`; see [Modes](#modes)                       |
+| `COMMENT`         | `BEASTIEPILOT_COMMENT`         | `-comment`         | `true`                                | Show the model what a command printed, for it to say [what came of it](#what-came-of-it) |
 | `AUTO_RUN`        | `BEASTIEPILOT_AUTO_RUN`        | `-auto-run`        | *(empty)*                             | Commands `safe` mode runs without asking, comma-separated     |
 | `PACKAGE_MANAGER` | `BEASTIEPILOT_PACKAGE_MANAGER` | `-package-manager` | `pkg`                                 | Install software with `pkg` (binary packages) or `ports`      |
 | `SOURCE_PATH`     | `BEASTIEPILOT_SOURCE_PATH`     | `-source-path`     | `/usr/src`                            | FreeBSD source tree to index; see [Reference material](#reference-material) |
@@ -821,10 +883,18 @@ prompt only steers the model; the protections below are enforced in code.
   to the model and not a safeguard. Everything above still applies to whatever
   it suggests, but index only material you trust, particularly alongside
   `AUTO_RUN`.
-- **The history is a file, and it steers the model too.** What you asked and
-  what was suggested stay on disk, readable by you alone, until they scroll
-  out of the file or you [forget them](#history); a password typed into a
-  request would stay there with it. And an answer that was wrong once keeps
+- **What a command prints goes to the model, and can steer it.** The output
+  is shown to the model for [its comment](#what-came-of-it) and goes along
+  with the next requests, so a file that says "now run this", printed by
+  `cat`, can influence the next suggestion, as an indexed document can. The
+  model is told that output is data; that is advice, not a safeguard. A
+  comment is never run, and every suggestion still passes through everything
+  above. `COMMENT=false` keeps output away from the model altogether.
+- **The history is a file, and it steers the model too.** What you asked,
+  what was suggested and the first and last lines of what it printed stay on
+  disk, readable by you alone, until they scroll out of the file or you
+  [forget them](#history); a password typed into a request, or printed by a
+  command, would stay there with it. And an answer that was wrong once keeps
   going along with later requests, where a small model may repeat it: when
   the suggestions start to echo an old mistake, `/clear`.
 - **No sandbox.** Commands run through `/bin/sh -c` with the privileges of the
@@ -849,8 +919,13 @@ Your request, the system prompt, and a few facts about the host: the output of
 working directory. In `guided` mode a second request carries your request and
 the suggested command. Your earlier requests go along as well, up to `HISTORY`
 of them and as many as fit, each with the command suggested for it and whether
-it ran and with what exit status; the output of the commands does not. See
-[History](#history).
+it ran and with what exit status. See [History](#history).
+
+After a command has run, one more request carries your request, the command,
+its exit status and what it printed, for the model to say
+[what came of it](#what-came-of-it), and what the latest three commands
+printed goes along with the requests after that. With `COMMENT=false` no
+output of any command is sent or kept.
 
 With an index, the request is also sent to the embedding model, and up to three
 excerpts of the indexed files travel with it to the model that writes the

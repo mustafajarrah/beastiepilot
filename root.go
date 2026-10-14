@@ -165,11 +165,10 @@ func (e elevation) notice(name string) string {
 	return fmt.Sprintf("%s needs root, and you are not root: on a yes, the command runs as root through %s, which %s.", name, e.tool, password)
 }
 
-// execute runs the command as root with the caller's stdin, stdout and stderr
-// attached, as execute does for any other, and returns its exit code. A
-// password refused shows as the exit code of the tool that asked for it.
-func (e elevation) execute() (int, error) {
+// start returns what runs the command as root. A password refused shows as
+// the exit code of the tool that asked for it.
+func (e elevation) start() *exec.Cmd {
 	cmd := exec.Command(e.argv[0], e.argv[1:]...)
 	cmd.Env = append(os.Environ(), e.env...)
-	return runCommand(cmd)
+	return cmd
 }
