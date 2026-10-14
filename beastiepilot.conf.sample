@@ -25,8 +25,9 @@
 # URL of Ollama's generate API.
 #ENDPOINT=http://localhost:11434/api/generate
 
-# How long to wait for the model before giving up (for example 90s or 5m).
-#TIMEOUT=2m
+# How long to wait for the model before giving up (for example 90s or 10m).
+# Without a GPU the first answer is the slowest, the model being loaded then.
+#TIMEOUT=5m
 
 # The context window asked of Ollama with every request, in tokens. It holds
 # the instructions, the excerpts of reference material, the earlier requests

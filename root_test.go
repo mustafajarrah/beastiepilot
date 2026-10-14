@@ -143,9 +143,11 @@ func standIns(t *testing.T, tools ...string) (log string) {
 	dir := t.TempDir()
 	log = filepath.Join(dir, "log")
 	scripts := map[string]string{
-		"pkg":  "echo \"pkg $*\" >> " + log + "\nexit 3\n",
-		"doas": "echo \"doas $*\" >> " + log + "\nexec \"$@\"\n",
-		"sudo": "echo \"sudo $*\" >> " + log + "\nexec \"$@\"\n",
+		"pkg":   "echo \"pkg $*\" >> " + log + "\nexit 3\n",
+		"sysrc": "echo \"sysrc $*\" >> " + log + "\n",
+		"true":  "exit 0\n",
+		"doas":  "echo \"doas $*\" >> " + log + "\nexec \"$@\"\n",
+		"sudo":  "echo \"sudo $*\" >> " + log + "\nexec \"$@\"\n",
 		// Root's shell here is sh; with csh the line would mean the same.
 		"su": "echo \"su $*\" >> " + log + "\nexec /bin/sh -c \"$3\"\n",
 	}
@@ -300,5 +302,59 @@ func TestCommandInComment(t *testing.T) {
 	// The model is told of the command it gave, not of a refusal.
 	if want := "Command: pkg info -a\n    Outcome: it ran and exited with status 3\n"; len(asked) != 2 || !strings.Contains(asked[1].System, want) {
 		t.Errorf("the second request lacks %q", want)
+	}
+}
+
+// TestSeveralLinesAsRoot is a session a small model was seen to give: asked
+// to install something and enable it, it answered with a command to a line,
+// as comments one time and plainly the next.
+func TestSeveralLinesAsRoot(t *testing.T) {
+	isolate(t)
+	log := standIns(t, "su", "sysrc", "true")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req generateRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		reply := "# pkg install nginx\n# sysrc nginx_enable=\"YES\""
+		if strings.Contains(req.Prompt, "plainly") {
+			reply = "true\nsysrc nginx_enable=YES\npkg install nginx\nsysrc sshd_enable=YES"
+		}
+		json.NewEncoder(w).Encode(generateResponse{Response: reply})
+	}))
+	defer srv.Close()
+	cfg := defaultSettings()
+	cfg.Endpoint, cfg.Banner = srv.URL, bannerOff
+
+	var out bytes.Buffer
+	p := &pilot{ui: styler{out: &out}, in: strings.NewReader("install nginx and enable it at boot\ny\nand plainly\ny\n"), cfg: cfg}
+	if code := p.session(); code != exitOK {
+		t.Errorf("the session ended with %d, want 0", code)
+	}
+	shown := out.String()
+	for _, want := range []string{
+		"    pkg install nginx && sysrc nginx_enable=\"YES\"\n",
+		"The model gave this as a comment, where it is told to say that a request is unclear",
+		"The model gave 2 lines with a command to each, which are joined here with &&: each command runs only if the one before it worked.",
+		"pkg install needs root, and you are not root: on a yes, the command runs as root through su, which asks for root's password.",
+		"    true && sysrc nginx_enable=YES && pkg install nginx && sysrc sshd_enable=YES\n",
+		"The model gave 4 lines with a command to each,",
+		"sysrc nginx_enable=YES needs root,",
+	} {
+		if !says(shown, want) {
+			t.Errorf("the session never showed %q:\n%s", want, shown)
+		}
+	}
+	if n := strings.Count(shown, "Execute this command as root? [y/N]"); n != 2 {
+		t.Errorf("root was asked for %d times, want twice:\n%s", n, shown)
+	}
+	// Each line went to su whole, and stopped where a command failed: the
+	// stand-in for pkg ends with status 3.
+	raw, _ := os.ReadFile(log)
+	want := "su root -c /bin/sh -c 'eval \"$BEASTIEPILOT_COMMAND\"'\npkg install nginx\n" +
+		"su root -c /bin/sh -c 'eval \"$BEASTIEPILOT_COMMAND\"'\nsysrc nginx_enable=YES\npkg install nginx\n"
+	if string(raw) != want {
+		t.Errorf("this ran:\n%s\nwant:\n%s", raw, want)
+	}
+	if len(p.past) != 2 || p.past[0].Command != `pkg install nginx && sysrc nginx_enable="YES"` || p.past[0].Outcome != "it ran as root and exited with status 3" {
+		t.Errorf("the session remembers %+v", p.past)
 	}
 }

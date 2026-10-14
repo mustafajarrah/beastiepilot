@@ -545,7 +545,7 @@ func TestEndpointHost(t *testing.T) {
 }
 
 func TestCommented(t *testing.T) {
-	installed := wordSet("pkg df du which service cd /usr/sbin/pkg")
+	installed := wordSet("pkg df du which service sysrc cd /usr/sbin/pkg")
 	lookPath := func(name string) (string, error) {
 		if installed[name] {
 			return name, nil
@@ -555,8 +555,18 @@ func TestCommented(t *testing.T) {
 	tests := []struct {
 		reply, want string
 	}{
+		// Commands where the refusal goes, one to a line.
+		{"# pkg install nginx\n# sysrc nginx_enable=\"YES\"", `pkg install nginx && sysrc nginx_enable="YES"`},
+		{"# pkg install nginx\n#\n\n  ## service nginx start;\n# df -h\n", "pkg install nginx && service nginx start && df -h"},
+		// But not when one of them is a sentence, or when they are a script.
+		{"# pkg install nginx\n# This installs the web server.", ""},
+		{"# pkg install nginx\n# service is then started", ""},
+		{"# pkg install nginx &&\n# service nginx start", ""},
+		{"# df -h > /tmp/report\n# du -sh .", ""},
+
 		// A command where the refusal goes.
 		{"# pkg install xorg-wayland", "pkg install xorg-wayland"},
+		{"# df -h > /tmp/report", "df -h > /tmp/report"},
 		{"#pkg install xorg", "pkg install xorg"},
 		{"## df -h\n", "df -h"},
 		{"  # du -sh .", "du -sh ."},
@@ -579,15 +589,60 @@ func TestCommented(t *testing.T) {
 		{"#", ""},
 		{"# ", ""},
 		{"# A=b", ""},
-		// Not a comment at all, or more than one line: left to the rest.
+		// Not a comment at all, or not all of it: left to the rest.
 		{"pkg install nginx", ""},
 		{"# first\n# pkg install nginx", ""},
 		{"# pkg install nginx\npkg clean", ""},
 		{"", ""},
 	}
 	for _, tt := range tests {
-		if got := commented(tt.reply, lookPath); got != tt.want {
-			t.Errorf("commented(%q) = %q, want %q", tt.reply, got, tt.want)
+		// Every line that says something counts, when a command comes of it.
+		lines := 0
+		for _, line := range strings.Split(tt.reply, "\n") {
+			if tt.want != "" && strings.Trim(line, "# \t") != "" {
+				lines++
+			}
+		}
+		if got, n := commented(tt.reply, lookPath); got != tt.want || n != lines {
+			t.Errorf("commented(%q) = %q in %d lines, want %q in %d", tt.reply, got, n, tt.want, lines)
+		}
+	}
+}
+
+func TestSeveralLines(t *testing.T) {
+	tests := []struct {
+		reply, want string
+		lines       int
+	}{
+		{"pkg install nginx\nsysrc nginx_enable=YES", "pkg install nginx && sysrc nginx_enable=YES", 2},
+		{"cd /usr/ports/www/nginx\n\n  make install clean\n", "cd /usr/ports/www/nginx && make install clean", 2},
+		{"echo a;\necho 'b c'\necho d 2>/dev/null", "echo a && echo 'b c' && echo d 2>/dev/null", 3},
+		{"pkg update; pkg upgrade\nfreebsd-version || true", "pkg update; pkg upgrade && freebsd-version || true", 2},
+
+		// One line is what was asked for.
+		{"pkg install nginx", "", 0},
+		{"pkg install nginx\n\n", "", 0},
+		{"", "", 0},
+		// A script is left as it is: lines that go on, conditions and loops,
+		// and whatever cannot be taken apart with certainty.
+		{"echo a \\\n  b", "", 0},
+		{"echo a |\nsort", "", 0},
+		{"pkg install nginx &&\nsysrc nginx_enable=YES", "", 0},
+		{"sleep 5 &\necho b", "", 0},
+		{"if [ -f /etc/rc.conf ]; then\n  echo yes\nfi", "", 0},
+		{"for f in a b; do\necho $f\ndone", "", 0},
+		{"case $x in\na) echo a;;\nesac", "", 0},
+		{"{\necho a\n}", "", 0},
+		{"echo one\necho two > /tmp/x", "", 0},
+		{"echo $(date)\necho b", "", 0},
+		{"cat <<EOF\ntext\nEOF", "", 0},
+		{"# first this\npkg info", "", 0},
+		{"$EDITOR /etc/rc.conf\necho done", "", 0},
+		{"echo 'a\nb'\necho c", "", 0},
+	}
+	for _, tt := range tests {
+		if got, n := severalLines(tt.reply); got != tt.want || n != tt.lines {
+			t.Errorf("severalLines(%q) = %q in %d lines, want %q in %d", tt.reply, got, n, tt.want, tt.lines)
 		}
 	}
 }

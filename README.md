@@ -677,7 +677,7 @@ Every setting has a key for the file, an environment variable and a flag.
 | `MODEL`           | `BEASTIEPILOT_MODEL`           | `-model`           | `llama3.2`                            | Ollama model to query                                         |
 | `EMBED_MODEL`     | `BEASTIEPILOT_EMBED_MODEL`     | `-embed-model`     | `nomic-embed-text`                    | Ollama model that embeds text for the index                   |
 | `ENDPOINT`        | `BEASTIEPILOT_ENDPOINT`        | `-endpoint`        | `http://localhost:11434/api/generate` | Ollama generate API URL                                       |
-| `TIMEOUT`         | `BEASTIEPILOT_TIMEOUT`         | `-timeout`         | `2m`                                  | How long to wait for the model                                |
+| `TIMEOUT`         | `BEASTIEPILOT_TIMEOUT`         | `-timeout`         | `5m`                                  | How long to wait for the model                                |
 | `CONTEXT`         | `BEASTIEPILOT_CONTEXT`         | `-context`         | `4096`                                | Context window asked of Ollama, in tokens, from 4096 to 131072 |
 | `HISTORY`         | `BEASTIEPILOT_HISTORY`         | `-history`         | `100`                                 | Earlier requests kept and sent with each new one, from 0 to 1000; see [History](#history) |
 | `TYPE`            | `BEASTIEPILOT_TYPE`            | `-type`            | `safe`                                | `guided` or `safe`; see [Modes](#modes)                       |
@@ -877,6 +877,12 @@ prompt only steers the model; the protections below are enforced in code.
   puts a command where the refusal goes, as in `# pkg install nginx`. Such a
   command is offered like any other, under a notice that says where it came
   from, and never runs through `AUTO_RUN`.
+- **Several lines become one.** The model is told to answer with one line,
+  and a small one sometimes gives a command to a line instead, in comments or
+  not. Those are joined with `&&` and shown that way, under a notice: each
+  command then runs only if the one before it worked, and the line can be
+  [recognized as needing root](#commands-that-need-root). Lines that make up
+  a script, with a condition, a loop or a redirection, are left as they are.
 - **Indexed files can steer the model.** Excerpts of your reference material
   become part of the prompt, so a document that says "run this" can influence
   the suggestion. The model is told to treat excerpts as data, which is advice

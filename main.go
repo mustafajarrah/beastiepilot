@@ -38,7 +38,10 @@ const (
 	defaultEndpoint   = "http://localhost:11434/api/generate"
 	defaultModel      = "llama3.2"
 	defaultEmbedModel = "nomic-embed-text"
-	defaultTimeout    = 2 * time.Minute
+	// defaultTimeout is how long an answer is waited for. A model that runs
+	// on the CPU alone has been seen to take more than two minutes over its
+	// first answer, while it is still being loaded.
+	defaultTimeout = 5 * time.Minute
 
 	// maxResponseBytes caps how much of an Ollama reply is read. A shell
 	// command is tiny; anything near this size is a misbehaving server.
@@ -385,9 +388,13 @@ func (p *pilot) answer(intent string) int {
 	// A model that is not sure tends to put the command where its refusal
 	// goes. Shown as a refusal it would be a command nobody can run, so it is
 	// offered as one, with a word about where it came from.
-	hedged := false
-	if inside := commented(command, exec.LookPath); inside != "" {
-		command, hedged = inside, true
+	// Nor does one always keep to the single line it is told to give: several
+	// lines with a command to each become one, which can be taken apart.
+	hedged, lines := false, 0
+	if inside, n := commented(command, exec.LookPath); inside != "" {
+		command, hedged, lines = inside, true, n
+	} else if one, n := severalLines(command); one != "" {
+		command, lines = one, n
 	}
 	if reason, ok := declined(command); ok {
 		fmt.Fprintf(ui.out, "\n  %s %s\n", ui.paint(boldYellow, "!"), reason)
@@ -401,6 +408,9 @@ func (p *pilot) answer(intent string) int {
 	rev := inspect(command)
 	if hedged {
 		rev.notices = append(rev.notices, "The model gave this as a comment, where it is told to say that a request is unclear or cannot be done: it may not be what you asked for.")
+	}
+	if lines > 1 {
+		rev.notices = append(rev.notices, fmt.Sprintf("The model gave %d lines with a command to each, which are joined here with &&: each command runs only if the one before it worked.", lines))
 	}
 	rev.notices = append(rev.notices, hostNotices()...)
 	// A command that only root can run goes through the tool this machine has
@@ -958,39 +968,122 @@ var notVerbs = wordSet(`is are was were has have had does do did can cannot can'
 	would should must may might not no é não nao está pode tem foi`)
 
 // commented returns the command a reply holds when the model put its answer
-// where a refusal goes: a single comment whose text is a command, as in
-// "# pkg install nginx". For a refusal in words it returns "".
+// where a refusal goes, in comments whose text is a command, as in
+// "# pkg install nginx", and how many lines of them there were. Several, a
+// command to each, come back as the one line that oneLine makes of them. For
+// a refusal in words it returns "".
 //
 // A reason is a sentence and a command is not. To count as a command, the
 // text must begin with the name of a program this machine has, in lower case,
 // must not go on like a sentence about that program and must not end like one.
 // Whatever fails that stays a refusal, which costs nothing but a request.
-func commented(reply string, lookPath func(string) (string, error)) string {
-	line := strings.TrimSpace(reply)
-	if !strings.HasPrefix(line, "#") || strings.Contains(line, "\n") {
-		return ""
+func commented(reply string, lookPath func(string) (string, error)) (command string, lines int) {
+	var texts []string
+	for _, line := range strings.Split(reply, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "#") {
+			return "", 0
+		}
+		text := strings.TrimSpace(strings.TrimLeft(line, "#"))
+		if text == "" {
+			continue
+		}
+		if !reads(text, lookPath) {
+			return "", 0
+		}
+		texts = append(texts, text)
 	}
-	text := strings.TrimSpace(strings.TrimLeft(line, "#"))
+	switch len(texts) {
+	case 0:
+		return "", 0
+	case 1:
+		return texts[0], 1
+	}
+	if command = oneLine(texts); command == "" {
+		return "", 0
+	}
+	return command, len(texts)
+}
+
+// reads reports whether text reads as a command, as commented describes.
+func reads(text string, lookPath func(string) (string, error)) bool {
 	words := strings.Fields(text)
 	// VAR=value before the command is not its name.
 	for len(words) > 0 && isAssignment(words[0]) {
 		words = words[1:]
 	}
 	if len(words) == 0 {
-		return ""
+		return false
 	}
 	name, last := words[0], words[len(words)-1]
 	if name != strings.ToLower(name) || len(words) > 1 && notVerbs[strings.ToLower(words[1])] {
-		return ""
+		return false
 	}
 	// "du -sh ." ends with a directory, "pkg cannot do that." with a full stop.
 	if strings.ContainsAny(last[len(last)-1:], "?!:") || strings.HasSuffix(last, ".") && strings.Trim(last, ".") != "" {
+		return false
+	}
+	_, err := lookPath(name)
+	return err == nil
+}
+
+// shellKeywords are the words that open, carry on or close what the shell
+// reads over several lines as one command: a condition, a loop, a function.
+var shellKeywords = wordSet("if then else elif fi for while until do done case esac in function { } !")
+
+// severalLines returns a reply that gives a command to a line as the one
+// line that oneLine makes of them, and how many lines there were. It returns
+// "" for a reply of one line and for one that oneLine leaves alone.
+func severalLines(reply string) (command string, lines int) {
+	var rows []string
+	for _, line := range strings.Split(reply, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			rows = append(rows, line)
+		}
+	}
+	if len(rows) < 2 {
+		return "", 0
+	}
+	if command = oneLine(rows); command == "" {
+		return "", 0
+	}
+	return command, len(rows)
+}
+
+// oneLine joins commands that stand one to a line into a single line with
+// &&, so that each runs only if the one before it worked. A small model
+// answers that way although it is told to give one line, and a reply of
+// several lines cannot be taken apart: nothing would tell that it needs root.
+//
+// It returns "" unless every line is made of commands that splitCommands can
+// take apart, complete in themselves. A line that goes on to the next, or that
+// belongs to a condition or a loop, makes the lines a script, which is left
+// as it is.
+func oneLine(lines []string) string {
+	var parts []string
+	for _, line := range lines {
+		line = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ";"))
+		if line == "" || strings.ContainsAny(line[len(line)-1:], `\|&;`) {
+			return ""
+		}
+		commands, err := splitCommands(line)
+		if err != nil || len(commands) == 0 {
+			return ""
+		}
+		for _, words := range commands {
+			if !words[0].literal || shellKeywords[words[0].text] {
+				return ""
+			}
+		}
+		parts = append(parts, line)
+	}
+	if len(parts) < 2 {
 		return ""
 	}
-	if _, err := lookPath(name); err != nil {
-		return ""
-	}
-	return text
+	return strings.Join(parts, " && ")
 }
 
 // review is what inspect found in a suggested command.
